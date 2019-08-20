@@ -31,7 +31,7 @@ echo "Creating ${fs} on ${part}"
 if [ ${fs} = "ext4" ]; then
 	parted --script ${drive} mkpart primary 4 1000 || die "Unable to create partition on ${drive}"
 	sleep 1	
-	mkfs.ext4 ${part} -L ${fslabel} || die "Unable to create FS on ${part}"
+	mkfs.ext4 -b 4096 ${part} -L ${fslabel} || die "Unable to create FS on ${part}"
 elif [ ${fs} = "vfat" ]; then
 	parted --script ${drive} mkpart primary fat32 4 1000 || die "Unable to create partition on ${drive}"
 	sleep 1	
