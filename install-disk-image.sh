@@ -6,8 +6,9 @@ die() {
 	exit 1	
 }
 
-if [ "$#" -lt "4" ]; then
-	die "Usage: $0 <disk drive> <filesystem> <label> <rootfs tar file>"
+if [ "$#" -ne "4" ]; then
+	die "Usage: $0 <disk drive> <filesystem> <label> <rootfs tar file>\n \
+		e.g. $0 /dev/sdX ext4 MYLABEL rootfs.tar.bz2"
 fi
 
 if [ $(id -u) -ne 0 ]; then
@@ -19,6 +20,12 @@ part="${drive}1"
 fs="${2}"
 fslabel="${3}"
 rootfs="${4}"
+
+for part in ${drive}?*; do
+	if grep -qs "${part} " /proc/mounts; then
+		die "Disk mounted: ${part}. Unmount and try again"
+	fi
+done
 
 if [ ${fs} != "ext4" ] && [ ${fs} != "vfat" ]; then
 	die "Unsupported fs"
