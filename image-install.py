@@ -28,10 +28,14 @@ class ConfigError(Exception):
 class InvalidArgument(Exception):
     pass
 
-def make_ext4(partition):
-    run_command('mkfs.ext4', ['-F', '-q', partition])
+def make_ext4(partition, config):
+    args = ['-F', '-q']
+    if 'blocksize' in config:
+        args.extend(['-b', str(config['blocksize'])])
+    args.append(partition)
+    run_command('mkfs.ext4', args)
     
-def make_raw(partition):
+def make_raw(partition, config):
     pass
 
 fs_types = {
@@ -113,6 +117,8 @@ def prepare_config(config, images):
             if not p['fs'] in fs_types:
                 raise ConfigError(f'partition fs unknown type: {p["fs"]}')
             check_attribute('partition', p, 'size', int)
+            if 'blocksize' in p:
+                check_attribute('partition', p, 'blocksize', int)
 
     if 'images' in config:
         if not isinstance(config['partitions'], list):
@@ -167,7 +173,7 @@ def create_partitions(config, device):
     for p in config['partitions']:
         part = partlabel_to_part(device, p['label'])
         print(f'creating {p["fs"]} filesystem on {part} with label {p["label"]}')
-        fs_types[p['fs']](part)
+        fs_types[p['fs']](part, config)
  
 def install_images(config, device, images):
     for i in config['images']:

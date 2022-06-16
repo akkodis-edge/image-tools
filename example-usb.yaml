@@ -2,6 +2,7 @@ partitions:
    - label: TESTDRIVE
      fs: ext4
      size: 1000
+     blocksize: 4096
 
 images:
    - name: image
