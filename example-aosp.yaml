@@ -1,0 +1,25 @@
+images:
+   - name: table
+     type: raw
+     target: device
+     reload_partitions: true
+
+   - name: boot
+     type: raw
+     target: label:boot_a
+
+   - name: dtbo
+     type: raw
+     target: label:dtbo_a
+
+   - name: vbmeta
+     type: raw
+     target: label:vbmeta_a
+
+   - name: vendor_boot
+     type: raw
+     target: label:vendor_boot_a
+
+   - name: super
+     type: android-sparse
+     target: label:super

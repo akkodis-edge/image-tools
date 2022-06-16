@@ -1,0 +1,9 @@
+partitions:
+   - label: TESTDRIVE
+     fs: ext4
+     size: 1000
+
+images:
+   - name: image
+     type: tar.bz2
+     target: label:TESTDRIVE

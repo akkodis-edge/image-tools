@@ -1,0 +1,17 @@
+partitions:
+   - label: rootfs1
+     fs: ext4
+     size: 1000MiB
+
+   - label: rootfs2
+     fs: ext4
+     size: 1000MiB
+
+   - label: data
+     fs: ext4
+     size: 10000MiB
+
+images:
+   - name: image
+     type: tar.bz2
+     target: label:rootfs1
