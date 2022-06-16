@@ -75,8 +75,15 @@ def install_tar_bz2(device, target, file):
     with mount(part) as path:
         run_command('tar', ['-xf', file, '-C', path])
 
+def install_raw(device, target, file):
+    (type, name) = split_target(target)
+    if type != 'device' and name is not None:
+        raise ConfigError(f'raw image invalid target: {target}')
+    run_command('dd', [f'if={file}', f'of={device}', 'bs=1M'])
+
 image_types = {       
     'tar.bz2': install_tar_bz2,
+    'raw': install_raw,
 }
 
 def read_config(path):
@@ -182,6 +189,10 @@ def install_images(config, device, images):
         file = images[i['name']]
         print(f'install of {type} to {target} from {file}')
         image_types[type](device, target, file)
+        if 'reload_partitions' in i:
+            print('partition reload requested..')
+            partprobe(device)
+            
             
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='''Image installer''',
