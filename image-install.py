@@ -164,7 +164,7 @@ def prepare_config(config, images):
                 check_attribute('partition', p, 'blocksize', int)
 
     if 'images' in config:
-        if not isinstance(config['partitions'], list):
+        if not isinstance(config['images'], list):
             raise ConfigError('images not of type list')
         for i in config['images']:
             check_attribute('image', i, 'name', str)
