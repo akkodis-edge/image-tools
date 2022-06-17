@@ -12,6 +12,7 @@
 #   sync
 #   dd
 #   bzcat
+#   simg2stdout
 
 import os
 import sys
@@ -95,10 +96,30 @@ def install_raw(device, target, file, bz2=False):
 def install_raw_bz2(device, target, file):
     install_raw(device, target, file, bz2=True)
     
+def install_android_sparse(device, target, file, bz2=False):
+    (type, name) = split_target(target)
+    out = None
+    if type == 'device' and name is None:
+        out = device
+    if type == 'label' and name is not None:
+        out = partlabel_to_part(device, name)
+    if out is None:
+        raise ConfigError(f'Unresolved target: {target}')
+    if bz2:
+        cmd = f'bzcat {file} | simg2stdout | dd of={out} bs=1M'
+    else:
+        cmd = f'simg2stdout {file} | dd of={out} bs=1M'
+    subprocess.run(cmd, check=True, shell=True)    
+    
+def install_android_sparse_bz2(device, target, file):
+    install_android_sparse(device, target, file, bz2=True)
+    
 image_types = {       
     'tar.bz2': install_tar_bz2,
     'raw': install_raw,
     'raw.bz2': install_raw_bz2,
+    'android-sparse': install_android_sparse,
+    'android-sparse.bz2': install_android_sparse_bz2,
 }
 
 def read_config(path):
