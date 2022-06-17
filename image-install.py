@@ -225,7 +225,7 @@ def install_images(config, device, images):
         file = images[i['name']]
         print(f'install of {type} to {target} from {file}')
         image_types[type](device, target, file)
-        if 'reload_partitions' in i:
+        if 'reload_partitions' in i and i['reload_partitions']:
             print('partition reload requested..')
             partprobe(device)
             
