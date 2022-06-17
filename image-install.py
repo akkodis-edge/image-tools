@@ -12,7 +12,7 @@
 #   sync
 #   dd
 #   bzcat
-#   simg2stdout
+#   simg2img
 
 import os
 import sys
@@ -78,6 +78,20 @@ def install_tar_bz2(device, target, file):
     with mount(part) as path:
         run_command('tar', ['-xf', file, '-C', path])
 
+@contextmanager
+def popen(cmd, args, stdin=None, stdout=None):
+    l = [shutil.which(cmd)]
+    if l[0] is None:
+        raise OSError(f'Could not find {cmd}')
+    l.extend(args)
+    p = subprocess.Popen(l, stdin=stdin, stdout=stdout)
+    try:
+        yield p
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+
 def install_raw(device, target, file, bz2=False):
     (type, name) = split_target(target)
     out = None
@@ -88,8 +102,14 @@ def install_raw(device, target, file, bz2=False):
     if out is None:
         raise ConfigError(f'Unresolved target: {target}')
     if bz2:
-        cmd = f'bzcat {file} | dd of={out} bs=1M'
-        subprocess.run(cmd, check=True, shell=True)
+        with popen('bzcat', [file], stdout=subprocess.PIPE) as bzcat:
+            with popen('dd', [f'of={out}', 'bs=1M'], stdin=bzcat.stdout) as dd:
+                dd.wait()
+                bzcat.wait()
+                if dd.returncode:
+                    raise OSError(f'dd exited with {dd.returncode}')
+                if bzcat.returncode:
+                    raise OSError(f'bzcat exited with {bzcat.returncode}')
     else:
         run_command('dd', [f'if={file}', f'of={out}', 'bs=1M'])
 
@@ -106,10 +126,16 @@ def install_android_sparse(device, target, file, bz2=False):
     if out is None:
         raise ConfigError(f'Unresolved target: {target}')
     if bz2:
-        cmd = f'bzcat {file} | simg2stdout | dd of={out} bs=1M'
+        with popen('bzcat', [file], stdout=subprocess.PIPE) as bzcat:
+            with popen('simg2img', ['-', out], stdin=bzcat.stdout) as simg:
+                simg.wait()
+                bzcat.wait()
+                if simg.returncode:
+                    raise OSError(f'simg2img exited with {simg.returncode}')
+                if bzcat.returncode:
+                    raise OSError(f'bzcat exited with {dd.returncode}')
     else:
-        cmd = f'simg2stdout {file} | dd of={out} bs=1M'
-    subprocess.run(cmd, check=True, shell=True)    
+        run_command('simg2img', [file, out])
     
 def install_android_sparse_bz2(device, target, file):
     install_android_sparse(device, target, file, bz2=True)
