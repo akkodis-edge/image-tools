@@ -294,7 +294,7 @@ if __name__ == '__main__':
             
     if 'partitions' in config:
         parts = list_partitions(args.device)
-        if len(parts) > 0 and not args.wipefs:
+        if len(parts) > 0:
             print('requested creating partition table but it already exists', file=sys.stderr)
         print('creating partition table..')
         create_partitions(config, args.device)
