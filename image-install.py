@@ -10,6 +10,8 @@
 #   mkfs.ext4
 #   tar
 #   sync
+#   dd
+#   bzcat
 
 import os
 import sys
@@ -75,7 +77,7 @@ def install_tar_bz2(device, target, file):
     with mount(part) as path:
         run_command('tar', ['-xf', file, '-C', path])
 
-def install_raw(device, target, file):
+def install_raw(device, target, file, bz2=False):
     (type, name) = split_target(target)
     out = None
     if type == 'device' and name is None:
@@ -84,11 +86,19 @@ def install_raw(device, target, file):
         out = partlabel_to_part(device, name)
     if out is None:
         raise ConfigError(f'Unresolved target: {target}')
-    run_command('dd', [f'if={file}', f'of={out}', 'bs=1M'])
+    if bz2:
+        cmd = f'bzcat {file} | dd of={out} bs=1M'
+        subprocess.run(cmd, check=True, shell=True)
+    else:
+        run_command('dd', [f'if={file}', f'of={out}', 'bs=1M'])
 
+def install_raw_bz2(device, target, file):
+    install_raw(device, target, file, bz2=True)
+    
 image_types = {       
     'tar.bz2': install_tar_bz2,
     'raw': install_raw,
+    'raw.bz2': install_raw_bz2,
 }
 
 def read_config(path):
