@@ -77,9 +77,14 @@ def install_tar_bz2(device, target, file):
 
 def install_raw(device, target, file):
     (type, name) = split_target(target)
-    if type != 'device' and name is not None:
-        raise ConfigError(f'raw image invalid target: {target}')
-    run_command('dd', [f'if={file}', f'of={device}', 'bs=1M'])
+    out = None
+    if type == 'device' and name is None:
+        out = device
+    if type == 'label' and name is not None:
+        out = partlabel_to_part(device, name)
+    if out is None:
+        raise ConfigError(f'Unresolved target: {target}')
+    run_command('dd', [f'if={file}', f'of={out}', 'bs=1M'])
 
 image_types = {       
     'tar.bz2': install_tar_bz2,
