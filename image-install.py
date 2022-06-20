@@ -174,7 +174,7 @@ def check_attribute(name, dict, attribute, type):
     if not attribute in dict:
         raise ConfigError(f'{name} missing {attribute} attribute')
     if not isinstance(dict[attribute], type):
-        raise ConfigError(f'{name} {attribute} not of type {type(type)}')
+        raise ConfigError(f'{name} {attribute} not of type {type}')
 
 def prepare_config(config, images):
     if 'partitions' in config:
