@@ -272,7 +272,7 @@ if __name__ == '__main__':
     config = yaml.load(read_config(args.config), Loader=yaml.loader.SafeLoader)
     images = split_images(args.images)
     
-    if not pathlib.Path(args.device).is_block_device() and not os.isfile(args.device):
+    if not pathlib.Path(args.device).is_block_device() and not os.path.isfile(args.device):
         print('device not found', file=sys.stderr)
         sys.exit(1)
     
