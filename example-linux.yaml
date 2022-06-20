@@ -1,15 +1,15 @@
 partitions:
    - label: rootfs1
      fs: ext4
-     size: 1000MiB
+     size: 1000
 
    - label: rootfs2
      fs: ext4
-     size: 1000MiB
+     size: 1000
 
    - label: data
      fs: ext4
-     size: 10000MiB
+     size: 10000
 
 images:
    - name: image
