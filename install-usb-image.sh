@@ -1,4 +1,5 @@
 #!/bin/bash
+# Require bash due to builtin read
 
 FILESYSTEM="ext4"
 EXTRA="500"
@@ -58,10 +59,10 @@ if [ "x$LABEL" = "x" ]; then
 	exit 1
 fi
 
+echo -n "Calculating partition size.. "
 archive_size=$(( "$(tar -xf ${ARCHIVE} --to-stdout | wc -c)" / 1024 / 1024 ))
 partition_size=$(( (("${archive_size}" + "${EXTRA}") / 5) \
 						+ "${archive_size}" + "${EXTRA}" ))
-echo -n "Calculating partition size.. "
 echo "(ARCHIVE ${archive_size} + EXTRA ${EXTRA}) * 1,2 = ${partition_size}MiB"
 read -r -d '' config <<- EOM
 partitions:
