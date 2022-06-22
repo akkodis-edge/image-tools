@@ -266,16 +266,24 @@ if __name__ == '__main__':
     parser.add_argument('--device', required=True, help='Name of block device')
     parser.add_argument('--force-unmount', action='store_true', help='Unmount any mounted partitions on --device')
     parser.add_argument('--wipefs', action='store_true', help='Wipe any existing filesystems from --device if partitions node present in config')
+    parser.add_argument('--log', help='Path to optional output logfile')
     parser.add_argument('images', nargs='*', help='Paths to images defined in config. I.e. image=rootfs.tar.bz')
     args = parser.parse_args()
-    
-    config = yaml.load(read_config(args.config), Loader=yaml.loader.SafeLoader)
-    images = split_images(args.images)
     
     if not pathlib.Path(args.device).is_block_device() and not os.path.isfile(args.device):
         print('device not found', file=sys.stderr)
         sys.exit(1)
     
+    if args.log:
+        try:
+            with open(args.log, 'w') as f:
+                pass
+        except IOError:
+            print('outout log path write access denied', file=sys.stderr)
+            sys.exit(1)
+    
+    config = yaml.load(read_config(args.config), Loader=yaml.loader.SafeLoader)
+    images = split_images(args.images)
     validate_images(images)
     prepare_config(config, images)
 
@@ -304,5 +312,14 @@ if __name__ == '__main__':
         print('Syncing filesystem')
         run_command('sync', [])    
     
+    if args.log:
+        config['log'] = {
+            'device': args.device,
+            'force-unmount': args.force_unmount,
+            'wipefs': args.wipefs,
+            'images': {k: os.path.basename(v) for (k, v) in images.items()},
+        }
+        with open(args.log, 'w') as f:
+            f.write(yaml.safe_dump(config, sort_keys=False))
+            
     sys.exit(0)
-        
