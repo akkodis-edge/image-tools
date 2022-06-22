@@ -35,6 +35,9 @@ images:
      #  raw.bz2
      #  android-sparse
      #  android-sparse.bz2
+     #     Note: android-sparse.bz2 not recommended as may return errors if decompression too slow.
+     #           The tool used for writing image do disk (simg2img) will attempt to seek within input file
+     #           which is piped to stdin through bzip2.
      type: tar.bz2
      # Where to install image. Possible targets:
      #  label:[LABEL_OF_PARTITION] (label does not have to be defined in partitions section)
