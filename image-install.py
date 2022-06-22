@@ -319,6 +319,7 @@ if __name__ == '__main__':
             'wipefs': args.wipefs,
             'images': {k: os.path.basename(v) for (k, v) in images.items()},
         }
+        print(f'Writing log to {args.log}')
         with open(args.log, 'w') as f:
             f.write(yaml.safe_dump(config, sort_keys=False))
             
