@@ -6,6 +6,8 @@ EXTRA="500"
 LABEL=""
 DEVICE=""
 ARCHIVE=""
+# Path to image install application
+IMAGE_INSTALL="image-install"
 
 print_usage() {
     echo "Usage: install-usb-image [OPTIONS] -d DEVICE -l LABEL ARCHIVE"
@@ -14,6 +16,7 @@ print_usage() {
     echo "  -f,--filesystem   Filesystem to use. Default ${FILESYSTEM}"
     echo "  -e,--extra        Extra free space in MiB. Default ${EXTRA}"
     echo "  -l,--label        Gptlabel"
+    echo "  -p,--path         Path to image-install application. By default resolve by \$PATH"
 }
 
 while [ $# -gt 0 ]; do
@@ -35,6 +38,11 @@ while [ $# -gt 0 ]; do
 		;;
 	-l|--label)
 		LABEL="$2"
+		shift # past argument
+		shift # past value
+		;;
+	-p|--path)
+		IMAGE_INSTALL="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -77,7 +85,7 @@ images:
      target: "label:${LABEL}"
 EOM
 printf '%s\n' "$config"
-if printf '%s\n' "$config" | image-install --wipefs --device "$DEVICE" --config - image="${ARCHIVE}"; then
+if printf '%s\n' "$config" | "$IMAGE_INSTALL" --wipefs --device "$DEVICE" --config - image="${ARCHIVE}"; then
 	echo "Success!"
 	exit 0
 fi
