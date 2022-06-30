@@ -41,9 +41,13 @@ def make_ext4(partition, config):
 def make_raw(partition, config):
     pass
 
+def make_fat32(partition, config):
+    run_command('mkfs.fat', ['-F', '32',  partition])
+
 fs_types = {
     'ext4': make_ext4,
     'raw': make_raw,
+    'fat32': make_fat32,
 }
 
 def partlabel_to_part(device, label):
