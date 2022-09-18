@@ -83,7 +83,7 @@ def install_tar_bz2(device, target, file):
     if part is None:
         raise ConfigError(f'Unresolved target: {target}')
     with mount(part) as path:
-        run_command('tar', ['-xf', file, '-C', path])
+        run_command('tar', ['--numeric-owner', '-xf', file, '-C', path])
 
 @contextmanager
 def popen(cmd, args, stdin=None, stdout=None):
@@ -102,9 +102,7 @@ def popen(cmd, args, stdin=None, stdout=None):
 def install_raw(device, target, file, bz2=False):
     (type, name) = split_target(target)
     out = None
-    if type == 'device' and name is None:
-        if not device:
-            raise ConfigError('target:device missing mandatory --device')
+    if type == 'device' and name is None and device:
         out = device
     if type == 'label' and name is not None:
         out = partlabel_to_part(name, device=device)
@@ -128,9 +126,7 @@ def install_raw_bz2(device, target, file):
 def install_android_sparse(device, target, file, bz2=False):
     (type, name) = split_target(target)
     out = None
-    if type == 'device' and name is None:
-        if not device:
-            raise ConfigError('target:device missing mandatory --device')
+    if type == 'device' and name is None and device:
         out = device
     if type == 'label' and name is not None:
         out = partlabel_to_part(name, device=device)
