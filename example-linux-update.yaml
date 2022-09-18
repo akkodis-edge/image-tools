@@ -6,3 +6,6 @@ images:
    - name: image
      type: tar.bz2
      target: label:rootfs1
+   - name: app
+     type: tar.bz2
+     target: label:rootfs1/app

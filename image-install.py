@@ -56,8 +56,8 @@ def partlabel_to_part(label, device=None):
         args.append(device)
     return run_command('blkid', args, capture=True).strip('\n')
 
-def split_target(target):
-    l = target.split(':', 1)
+def split_target(target, delim=':'):
+    l = target.split(delim, 1)
     if len(l) > 1:
         return (l[0], l[1])
     return (l[0], None)
@@ -79,11 +79,17 @@ def install_tar_bz2(device, target, file):
     (type, name) = split_target(target)
     part = None
     if type == 'label':
-        part = partlabel_to_part(name, device=device)
+        (partname, dirpath) = split_target(name, delim='/')
+        part = partlabel_to_part(partname, device=device)
     if part is None:
         raise ConfigError(f'Unresolved target: {target}')
     with mount(part) as path:
-        run_command('tar', ['--numeric-owner', '-xf', file, '-C', path])
+        args = ['--numeric-owner', '-xf', file, '-C']
+        if dirpath:
+            args.append(path + '/'  + dirpath)
+        else:
+            args.append(path)
+        run_command('tar', args)
 
 @contextmanager
 def popen(cmd, args, stdin=None, stdout=None):
