@@ -75,7 +75,7 @@ echo "(ARCHIVE ${archive_size} + EXTRA ${EXTRA}) * 1,2 = ${partition_size}MiB"
 read -r -d '' config <<- EOM
 partitions:
    - label: "${LABEL}"
-     fs: "${FILESYSTEM}"
+     type: "${FILESYSTEM}"
      size: ${partition_size}
      blocksize: 4096
 

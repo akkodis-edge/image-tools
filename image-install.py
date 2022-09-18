@@ -44,7 +44,7 @@ def make_raw(partition, config):
 def make_fat32(partition, config):
     run_command('mkfs.fat', ['-F', '32',  partition])
 
-fs_types = {
+partition_types = {
     'ext4': make_ext4,
     'raw': make_raw,
     'fat32': make_fat32,
@@ -186,9 +186,9 @@ def prepare_config(config, images):
             raise ConfigError('partitions not of type list')
         for p in config['partitions']:
             check_attribute('partition', p, 'label', str)
-            check_attribute('partition', p, 'fs', str)
-            if not p['fs'] in fs_types:
-                raise ConfigError(f'partition fs unknown type: {p["fs"]}')
+            check_attribute('partition', p, 'type', str)
+            if not p['type'] in partition_types:
+                raise ConfigError(f'partition unknown type: {p["type"]}')
             check_attribute('partition', p, 'size', int)
             if 'blocksize' in p:
                 check_attribute('partition', p, 'blocksize', int)
@@ -239,14 +239,14 @@ def create_partitions(config, device):
     start = 4
     for p in config['partitions']:
         end = start + p['size']
-        run_command('parted', ['-s', device, 'mkpart', p['label'], p['fs'], f'{start}MiB', f'{end}MiB'])
+        run_command('parted', ['-s', device, 'mkpart', p['label'], p['type'], f'{start}MiB', f'{end}MiB'])
         start += p['size']
     
     partprobe(device)
     for p in config['partitions']:
         part = partlabel_to_part(device, p['label'])
-        print(f'creating {p["fs"]} filesystem on {part} with label {p["label"]}')
-        fs_types[p['fs']](part, config)
+        print(f'creating {p["type"]} filesystem on {part} with label {p["label"]}')
+        partition_types[p['type']](part, config)
  
 def install_images(config, device, images):
     for i in config['images']:

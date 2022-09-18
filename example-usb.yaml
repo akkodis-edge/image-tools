@@ -1,6 +1,6 @@
 partitions:
    - label: TESTDRIVE
-     fs: ext4
+     type: ext4
      size: 1000
      blocksize: 4096
 

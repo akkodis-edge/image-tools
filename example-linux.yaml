@@ -1,14 +1,14 @@
 partitions:
    - label: rootfs1
-     fs: ext4
+     type: ext4
      size: 1000
 
    - label: rootfs2
-     fs: ext4
+     type: ext4
      size: 1000
 
    - label: data
-     fs: ext4
+     type: ext4
      size: 10000
 
 images:
