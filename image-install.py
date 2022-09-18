@@ -50,8 +50,11 @@ partition_types = {
     'fat32': make_fat32,
 }
 
-def partlabel_to_part(device, label):
-    return run_command('blkid', ['-l', '-o', 'device', '-t', f'PARTLABEL={label}', device], capture=True).strip('\n')
+def partlabel_to_part(label, device=None):
+    args = ['-l', '-o', 'device', '-t', f'PARTLABEL={label}']
+    if device:
+        args.append(device)
+    return run_command('blkid', args, capture=True).strip('\n')
 
 def split_target(target):
     l = target.split(':', 1)
@@ -76,7 +79,7 @@ def install_tar_bz2(device, target, file):
     (type, name) = split_target(target)
     part = None
     if type == 'label':
-        part = partlabel_to_part(device, name)
+        part = partlabel_to_part(name, device=device)
     if part is None:
         raise ConfigError(f'Unresolved target: {target}')
     with mount(part) as path:
@@ -100,9 +103,11 @@ def install_raw(device, target, file, bz2=False):
     (type, name) = split_target(target)
     out = None
     if type == 'device' and name is None:
+        if not device:
+            raise ConfigError('target:device missing mandatory --device')
         out = device
     if type == 'label' and name is not None:
-        out = partlabel_to_part(device, name)
+        out = partlabel_to_part(name, device=device)
     if out is None:
         raise ConfigError(f'Unresolved target: {target}')
     if bz2:
@@ -124,9 +129,11 @@ def install_android_sparse(device, target, file, bz2=False):
     (type, name) = split_target(target)
     out = None
     if type == 'device' and name is None:
+        if not device:
+            raise ConfigError('target:device missing mandatory --device')
         out = device
     if type == 'label' and name is not None:
-        out = partlabel_to_part(device, name)
+        out = partlabel_to_part(name, device=device)
     if out is None:
         raise ConfigError(f'Unresolved target: {target}')
     if bz2:
@@ -213,24 +220,12 @@ def prepare_config(config, images):
             if not i['name'] in images:
                 raise InvalidArgument(f'image "{i["name"]}" missing path argument')
 
-def mounted_partitions(device):
+def mounted_partitions(starts_with=None):
     list = []
     with open('/proc/mounts', 'r') as f:
-        data = f.read()
-        for line in data.split('\n'):
-            if line.startswith(device):
-                list.append(line.split(' ', 1)[0])
-    return list
-
-def list_partitions(device):
-    l = []
-    with open('/proc/partitions', 'r') as f:
-        data = f.read()
-        for line in data.split('\n'):
-            cols = line.split(' ')
-            if cols[-1].startswith(device.lstrip('/dev/')):
-                l.append(f'/dev/{cols[-1]}')
-    return l
+        data = f.read().split('\n')
+    cond = lambda x: x.startswith(starts_with) if starts_with else True
+    return [x.split(' ', 1)[0] for x in data if cond(x)]
 
 def run_command(cmd, args, capture=False):
     l = [shutil.which(cmd)]
@@ -246,6 +241,7 @@ def create_partitions(config, device):
     partitions = config['partitions']
     # Create partitions if first partition entry is a partition table type.
     if len(partitions) > 0 and partitions[0]['type'] == 'table_gpt':
+        print(f'creating gpt partition table on device {device}')
         run_command('parted', ['-s', device, 'mklabel', 'gpt'])
         start = 4
         partitions = partitions[1:]
@@ -257,7 +253,7 @@ def create_partitions(config, device):
     
     # Always format defined partitions.
     for p in partitions:
-        part = partlabel_to_part(device, p['label'])
+        part = partlabel_to_part(p['label'], device=device)
         print(f'creating {p["type"]} filesystem on {part} with label {p["label"]}')
         partition_types[p['type']](part, config)
  
@@ -271,7 +267,11 @@ def install_images(config, device, images):
         if 'reload_partitions' in i and i['reload_partitions']:
             print('partition reload requested..')
             partprobe(device)
-            
+
+def is_create_partitions(config):
+    return 'partitions' in config and len(config['partitions']) > 0 \
+        and config['partitions'][0]['type'] == 'table_gpt'
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='''Image installer''',
                                      epilog='''Return value:
@@ -279,15 +279,19 @@ if __name__ == '__main__':
 ''',
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--config', required=True, help='Session configuration. When config is "-", read standard input')
-    parser.add_argument('--device', required=True, help='Name of block device')
+    parser.add_argument('--device', help='Name of block device')
     parser.add_argument('--force-unmount', action='store_true', help='Unmount any mounted partitions on --device')
     parser.add_argument('--wipefs', action='store_true', help='Wipe any existing filesystems from --device if partitions node present in config')
     parser.add_argument('--log', help='Path to optional output logfile')
     parser.add_argument('images', nargs='*', help='Paths to images defined in config. I.e. image=rootfs.tar.bz')
     args = parser.parse_args()
     
-    if not pathlib.Path(args.device).is_block_device() and not os.path.isfile(args.device):
+    if args.device and not pathlib.Path(args.device).is_block_device() and not os.path.isfile(args.device):
         print('device not found', file=sys.stderr)
+        sys.exit(1)
+    
+    if args.wipefs and not args.device:
+        print('missing --wipefs requirement --device')
         sys.exit(1)
     
     if args.log:
@@ -303,24 +307,35 @@ if __name__ == '__main__':
     validate_images(images)
     prepare_config(config, images)
 
-    mounted = mounted_partitions(args.device)
-    if len(mounted) > 0:
+    if is_create_partitions(config) and not args.device:
+        print('missing partition create requirement --device')
+        sys.exit(1)
+    
+    to_unmount = []
+    if is_create_partitions(config):
+        to_unmount = mounted_partitions(starts_with=args.device)
+    elif 'partitions' in config and len(config['partitions']) > 0:
+        mounted = mounted_partitions()
+        to_unmount = []
+        for cpart in config['partitions']:
+            block = partlabel_to_part(cpart['label'])
+            if block in mounted:
+                to_unmount.append(block)   
+    if len(to_unmount) > 0:
+        print('mounted partitions: ', to_unmount, sep='\n')
         if not args.force_unmount:
-            print('device partitions are mounted', file=sys.stderr)
+            print('partitions mounted but --force-unmount not set', file=sys.stderr)
             sys.exit(1)
-        for part in mounted:
+        for part in to_unmount:
             print(f'unmounting {part}')
             run_command('umount', [part])
-            
+
     if args.wipefs:
         print('wiping partition table..')
         run_command('wipefs', ['--all', args.device])
+        partprobe(args.device)
             
     if 'partitions' in config:
-        parts = list_partitions(args.device)
-        if len(parts) > 0:
-            print('requested creating partition table but it already exists', file=sys.stderr)
-        print('creating partition table..')
         create_partitions(config, args.device)
         
     if 'images' in config:
