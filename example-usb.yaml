@@ -1,4 +1,5 @@
 partitions:
+   - type: table_gpt
    - label: TESTDRIVE
      type: ext4
      size: 1000

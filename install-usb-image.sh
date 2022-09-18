@@ -74,6 +74,7 @@ partition_size=$(( (("${archive_size}" + "${EXTRA}") / 5) \
 echo "(ARCHIVE ${archive_size} + EXTRA ${EXTRA}) * 1,2 = ${partition_size}MiB"
 read -r -d '' config <<- EOM
 partitions:
+   - type: table_gpt
    - label: "${LABEL}"
      type: "${FILESYSTEM}"
      size: ${partition_size}

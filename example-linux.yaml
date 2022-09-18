@@ -1,4 +1,5 @@
 partitions:
+   - type: table_gpt
    - label: rootfs1
      type: ext4
      size: 1000

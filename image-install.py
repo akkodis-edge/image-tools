@@ -184,14 +184,22 @@ def prepare_config(config, images):
     if 'partitions' in config:
         if not isinstance(config['partitions'], list):
             raise ConfigError('partitions not of type list')
-        for p in config['partitions']:
+        create_partitions = False
+        for index, p in enumerate(config['partitions']):
+            # Test for special case where first partitions entry may be
+            # a partition table instruction.
+            if index == 0 and p['type'] == 'table_gpt':
+                create_partitions = True
+                continue
             check_attribute('partition', p, 'label', str)
             check_attribute('partition', p, 'type', str)
             if not p['type'] in partition_types:
                 raise ConfigError(f'partition unknown type: {p["type"]}')
-            check_attribute('partition', p, 'size', int)
-            if 'blocksize' in p:
-                check_attribute('partition', p, 'blocksize', int)
+            if create_partitions:
+                # These attributes are mandatory when creating new partitions.
+                check_attribute('partition', p, 'size', int)
+                if 'blocksize' in p:
+                    check_attribute('partition', p, 'blocksize', int)
 
     if 'images' in config:
         if not isinstance(config['images'], list):
@@ -235,15 +243,20 @@ def partprobe(device):
     run_command('partprobe', [device])
 
 def create_partitions(config, device):
-    run_command('parted', ['-s', device, 'mklabel', 'gpt'])
-    start = 4
-    for p in config['partitions']:
-        end = start + p['size']
-        run_command('parted', ['-s', device, 'mkpart', p['label'], p['type'], f'{start}MiB', f'{end}MiB'])
-        start += p['size']
+    partitions = config['partitions']
+    # Create partitions if first partition entry is a partition table type.
+    if len(partitions) > 0 and partitions[0]['type'] == 'table_gpt':
+        run_command('parted', ['-s', device, 'mklabel', 'gpt'])
+        start = 4
+        partitions = partitions[1:]
+        for p in partitions:
+            end = start + p['size']
+            run_command('parted', ['-s', device, 'mkpart', p['label'], p['type'], f'{start}MiB', f'{end}MiB'])
+            start += p['size']
+        partprobe(device)
     
-    partprobe(device)
-    for p in config['partitions']:
+    # Always format defined partitions.
+    for p in partitions:
         part = partlabel_to_part(device, p['label'])
         print(f'creating {p["type"]} filesystem on {part} with label {p["label"]}')
         partition_types[p['type']](part, config)
@@ -258,7 +271,6 @@ def install_images(config, device, images):
         if 'reload_partitions' in i and i['reload_partitions']:
             print('partition reload requested..')
             partprobe(device)
-            
             
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='''Image installer''',

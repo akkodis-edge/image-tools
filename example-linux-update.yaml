@@ -1,0 +1,8 @@
+partitions:
+   - label: rootfs1
+     type: ext4
+
+images:
+   - name: image
+     type: tar.bz2
+     target: label:rootfs1
