@@ -1,3 +1,6 @@
+# Create gpt partition table
+# Create and format ext4 partitions rootfs1, rootfs2 and data
+# Extract image to rootfs1/
 partitions:
    - type: table_gpt
    - label: rootfs1

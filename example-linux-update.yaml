@@ -1,3 +1,6 @@
+# Format partition with label rootfs1 as ext4.
+# Extract image to rootfs1/
+# Extract app to rootfs1/app
 partitions:
    - label: rootfs1
      type: ext4
