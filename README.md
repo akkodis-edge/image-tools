@@ -38,7 +38,7 @@ partitions:
      #   ext4
      #      ext4 filesystem
      #      Respects attributes:
-     #        size, label, blocksize
+     #        size, label, blocksize, fslabel
      #   table_gpt
      #      gpt partition table.
      #      This type must be first list entry.
@@ -51,6 +51,9 @@ partitions:
      # Optionally define blocksize in bytes.
      # By default blocksize is not defined to mkfs.
      blocksize: 4096
+     # Optionally set a filessytem label in addition
+     # to gpt label. Defaults to false.
+     fslabel: false
 
 # Optional images section.
 # List of image descriptions.

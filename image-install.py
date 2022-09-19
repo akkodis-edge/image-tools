@@ -35,6 +35,8 @@ def make_ext4(partition, config):
     args = ['-F', '-q']
     if 'blocksize' in config:
         args.extend(['-b', str(config['blocksize'])])
+    if config['fslabel']:
+        args.extend(['-L', config['label']])
     args.append(partition)
     run_command('mkfs.ext4', args)
     
@@ -202,13 +204,15 @@ def prepare_config(config, images):
                 continue
             check_attribute('partition', p, 'label', str)
             check_attribute('partition', p, 'type', str)
+            if 'blocksize' in p:
+                check_attribute('partition', p, 'blocksize', int)
+            p['fslabel'] = p.get('fslabel', False)
+            check_attribute('partition', p, 'fslabel', bool)
             if not p['type'] in partition_types:
                 raise ConfigError(f'partition unknown type: {p["type"]}')
             if create_partitions:
                 # These attributes are mandatory when creating new partitions.
                 check_attribute('partition', p, 'size', int)
-                if 'blocksize' in p:
-                    check_attribute('partition', p, 'blocksize', int)
 
     if 'images' in config:
         if not isinstance(config['images'], list):
