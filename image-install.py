@@ -261,7 +261,7 @@ def create_partitions(config, device):
     for p in partitions:
         part = partlabel_to_part(p['label'], device=device)
         print(f'creating {p["type"]} filesystem on {part} with label {p["label"]}')
-        partition_types[p['type']](part, config)
+        partition_types[p['type']](part, p)
  
 def install_images(config, device, images):
     for i in config['images']:
