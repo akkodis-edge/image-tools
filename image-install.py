@@ -64,6 +64,8 @@ def split_target(target, delim=':'):
         return (l[0], l[1])
     return (l[0], None)
 
+
+
 @contextmanager
 def mount(partition):
     mounted = False
@@ -107,26 +109,34 @@ def popen(cmd, args, stdin=None, stdout=None):
             p.kill()
             p.wait()
 
+def dd(input, output, bz2=False):
+        if bz2:
+            with popen('bzcat', [input], stdout=subprocess.PIPE) as bzcat:
+                with popen('dd', [f'of={output}', 'bs=1M'], stdin=bzcat.stdout) as dd:
+                    dd.wait()
+                    bzcat.wait()
+                    if dd.returncode:
+                        raise OSError(f'dd exited with {dd.returncode}')
+                    if bzcat.returncode:
+                        raise OSError(f'bzcat exited with {bzcat.returncode}')
+        else:
+            run_command('dd', [f'if={input}', f'of={output}', 'bs=1M'])
+
 def install_raw(device, target, file, bz2=False):
     (type, name) = split_target(target)
     out = None
     if type == 'device' and name is None and device:
         out = device
     if type == 'label' and name is not None:
-        out = partlabel_to_part(name, device=device)
+        (partname, dirpath) = split_target(name, delim='/')
+        out = partlabel_to_part(partname, device=device)
     if out is None:
         raise ConfigError(f'Unresolved target: {target}')
-    if bz2:
-        with popen('bzcat', [file], stdout=subprocess.PIPE) as bzcat:
-            with popen('dd', [f'of={out}', 'bs=1M'], stdin=bzcat.stdout) as dd:
-                dd.wait()
-                bzcat.wait()
-                if dd.returncode:
-                    raise OSError(f'dd exited with {dd.returncode}')
-                if bzcat.returncode:
-                    raise OSError(f'bzcat exited with {bzcat.returncode}')
+    if dirpath:
+        with mount(out) as path:
+            dd(file, f'{path}/{dirpath}', bz2)
     else:
-        run_command('dd', [f'if={file}', f'of={out}', 'bs=1M'])
+        dd(file, out, bz2)
 
 def install_raw_bz2(device, target, file):
     install_raw(device, target, file, bz2=True)
