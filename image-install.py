@@ -51,6 +51,11 @@ partition_types = {
     'raw': make_raw,
     'fat32': make_fat32,
 }
+partition_parted_fs_type = {
+    'ext4': 'ext2',
+    'raw': None,
+    'fat32': 'fat32',   
+}
 
 def partlabel_to_part(label, device=None):
     args = ['-l', '-o', 'device', '-t', f'PARTLABEL={label}']
@@ -263,7 +268,11 @@ def create_partitions(config, device):
         partitions = partitions[1:]
         for p in partitions:
             end = start + p['size']
-            run_command('parted', ['-s', device, 'mkpart', p['label'], p['type'], f'{start}MiB', f'{end}MiB'])
+            args = ['-s', device, 'mkpart', p['label']]
+            if partition_parted_fs_type[p['type']] is not None:
+                args.append(partition_parted_fs_type[p['type']])
+            args.extend([f'{start}MiB', f'{end}MiB'])
+            run_command('parted', args)
             start += p['size']
         partprobe(device)
     
