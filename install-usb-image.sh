@@ -72,17 +72,29 @@ archive_size=$(( "$(tar -xf ${ARCHIVE} --to-stdout | wc -c)" / 1024 / 1024 ))
 partition_size=$(( (("${archive_size}" + "${EXTRA}") / 5) \
 						+ "${archive_size}" + "${EXTRA}" ))
 echo "(ARCHIVE ${archive_size} + EXTRA ${EXTRA}) * 1,2 = ${partition_size}MiB"
+
+case "$FILESYSTEM" in
+	raw)
+		filetype="raw.bz2"
+		extra=""
+		;;
+	*)
+		filetype="tar.bz2"
+		extra="blocksize: 4096"
+		;;
+esac
+
 read -r -d '' config <<- EOM
 partitions:
    - type: table_gpt
    - label: "${LABEL}"
      type: "${FILESYSTEM}"
      size: ${partition_size}
-     blocksize: 4096
+     ${extra}
 
 images:
    - name: image
-     type: tar.bz2
+     type: "${filetype}"
      target: "label:${LABEL}"
 EOM
 printf '%s\n' "$config"
