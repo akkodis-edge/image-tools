@@ -114,20 +114,27 @@ def popen(cmd, args, stdin=None, stdout=None):
             p.kill()
             p.wait()
 
-def dd(input, output, bz2=False):
-        if bz2:
-            with popen('bzcat', [input], stdout=subprocess.PIPE) as bzcat:
-                with popen('dd', [f'of={output}', 'bs=1M'], stdin=bzcat.stdout) as dd:
-                    dd.wait()
-                    bzcat.wait()
-                    if dd.returncode:
-                        raise OSError(f'dd exited with {dd.returncode}')
-                    if bzcat.returncode:
-                        raise OSError(f'bzcat exited with {bzcat.returncode}')
-        else:
-            run_command('dd', [f'if={input}', f'of={output}', 'bs=1M'])
+def dd(input, output, bz2=False, sparse=False):
+    args = [f'of={output}']
+    if sparse:
+        args.append('bs=4K')
+        args.append('conv=sparse')
+    else:
+        args.append('bs=1M')
+    if bz2:
+        with popen('bzcat', [input], stdout=subprocess.PIPE) as bzcat:
+            with popen('dd', args, stdin=bzcat.stdout) as dd:
+                dd.wait()
+                bzcat.wait()
+                if dd.returncode:
+                    raise OSError(f'dd exited with {dd.returncode}')
+                if bzcat.returncode:
+                    raise OSError(f'bzcat exited with {bzcat.returncode}')
+    else:
+        args.append(f'if={input}')
+        run_command('dd', args)
 
-def install_raw(device, target, file, bz2=False):
+def install_raw(device, target, file, bz2=False, sparse=False):
     (type, name) = split_target(target)
     out = None
     if type == 'device' and name is None and device:
@@ -139,12 +146,18 @@ def install_raw(device, target, file, bz2=False):
         raise ConfigError(f'Unresolved target: {target}')
     if dirpath:
         with mount(out) as path:
-            dd(file, f'{path}/{dirpath}', bz2)
+            dd(file, f'{path}/{dirpath}', bz2, sparse)
     else:
-        dd(file, out, bz2)
+        dd(file, out, bz2, sparse)
 
 def install_raw_bz2(device, target, file):
     install_raw(device, target, file, bz2=True)
+    
+def install_raw_sparse(device, target, file):
+    install_raw(device, target, file, sparse=True)
+    
+def install_raw_sparse_bz2(device, target, file):
+    install_raw(device, target, file, bz2=True, sparse=True)
     
 def install_android_sparse(device, target, file, bz2=False):
     (type, name) = split_target(target)
@@ -174,6 +187,8 @@ image_types = {
     'tar.bz2': install_tar_bz2,
     'raw': install_raw,
     'raw.bz2': install_raw_bz2,
+    'raw-sparse': install_raw_sparse,
+    'raw-sparse.bz2': install_raw_sparse_bz2,
     'android-sparse': install_android_sparse,
     'android-sparse.bz2': install_android_sparse_bz2,
 }
