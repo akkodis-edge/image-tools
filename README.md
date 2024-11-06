@@ -93,3 +93,48 @@ $ image-install --wipefs --config above.config --device /dev/sdb image=files/roo
 
 ## install-usb-image
 Wrapper to image-install for installing a tar.bz2 archive to usb pen.
+
+## Image container
+Image format for packaging complete disk or partition images with checksum and optional installation scripts. The whole container is signed.
+
+The container is a concatenated blob of:
+
+```
++---------------+-------+-----------------------+
+| PART          | BYTES | TYPE                  |
++---------------+-------+-----------------------+
+| Container     | n     | squashfs              |
++---------------+-------+-----------------------+
+| Signature     | 4K    | openssl binary digest |
++---------------+-------+-----------------------+
+| Public key    | 4K    | DER formatted key     |
++---------------+-------+-----------------------+
+```
+
+make-image-container utility will output a container based on a config file describing target device.
+
+The config file needs an additional "disk" section with a "size" key describing size of disk in bytes.
+
+```
+disk:
+  size: 1000000
+  
+partitions:
+  ...
+  
+images:
+  ...
+```
+
+See example "example-linux-container.yaml".
+
+Reference usage for the example file which will output "build/service-image-sdb8000.container".
+
+```
+sudo ./make-image-container.sh -b build/ -c example-linux-container.yaml \
+	--images "image=../sdb8000/service-image-sdb8000.rootfs.tar.bz2" \
+	--key private.pem --path ./image-install.py \
+	service-image-sdb8000.container
+
+
+```
