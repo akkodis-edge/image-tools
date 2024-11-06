@@ -1,0 +1,25 @@
+# Device with 16GB eMMC running linux.
+# A/B root partitions and persistent data partition.
+
+disk:
+   # Size in bytes, 96% of 16GB disk.
+   # 4% capacity reserved for worst 
+   # known housekeeping overhead on eMMC.
+   size: 15360000000
+
+partitions:
+   - type: table_gpt
+   - label: rootfs1
+     type: ext4
+     size: 3000
+   - label: rootfs2
+     type: raw
+     size: 3000
+   - label: data
+     type: ext4
+     size: 8000
+
+images:
+   - name: image
+     type: tar.bz2
+     target: label:rootfs1
