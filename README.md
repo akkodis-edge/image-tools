@@ -135,6 +135,31 @@ sudo ./make-image-container.sh -b build/ -c example-linux-container.yaml \
 	--images "image=../sdb8000/service-image-sdb8000.rootfs.tar.bz2" \
 	--key private.pem --path ./image-install.py \
 	service-image-sdb8000.container
+```
+
+### Run tests
+
+```
+# prepare build
+mkdir build
+# make test key
+openssl genrsa -out build/private.pem 4096
+# Make sample archive
+echo content1 > build/file1
+echo content2 > build/file2
+tar -jcf build/sample.tar.bz2 -C build file1 file2
+# build container
+sudo ./make-image-container.sh -b build/ -c test/small.yaml \
+	--images "image=build/sample.tar.bz2" \
+	--key build/private.pem --path ./image-install.py \
+	sample.container
+# prepare target device
+truncate -s 21000192 build/blockdevice
+# Create loopdevice
+sudo losetup --show -P -f build/blockdevice 
+/dev/loop0
+
+
 
 
 ```
