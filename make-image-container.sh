@@ -30,6 +30,7 @@ print_usage() {
     echo "  -p,--path         Path to image-install application. By default resolve by \$PATH"
     echo "  --key             Path to private key for signing image"
     echo "  --disk-name       Name to use for disk image inside container"
+    echo "                    Reserved names: disk.img disk.img.sha256 preinstall postinstall"
 }
 
 image_install="image-install"
