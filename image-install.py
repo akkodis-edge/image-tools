@@ -144,7 +144,7 @@ def install_raw(device, target, file, bz2=False, sparse=False):
         out = partlabel_to_part(partname, device=device)
     if out is None:
         raise ConfigError(f'Unresolved target: {target}')
-    if dirpath:
+    if 'dirpath' in locals():
         with mount(out) as path:
             dd(file, f'{path}/{dirpath}', bz2, sparse)
     else:
