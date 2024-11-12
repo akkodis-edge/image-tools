@@ -69,8 +69,6 @@ def split_target(target, delim=':'):
         return (l[0], l[1])
     return (l[0], None)
 
-
-
 @contextmanager
 def mount(partition):
     mounted = False
@@ -321,19 +319,24 @@ if __name__ == '__main__':
     parser.add_argument('--config', required=True, help='Session configuration. When config is "-", read standard input')
     parser.add_argument('--device', help='Name of block device')
     parser.add_argument('--force-unmount', action='store_true', help='Unmount any mounted partitions on --device')
-    parser.add_argument('--wipefs', action='store_true', help='Wipe any existing filesystems from --device if partitions node present in config')
+    parser.add_argument('--wipefs', action='store_true', help='Wipe any existing filesystems from --device')
+    parser.add_argument('--zero-fill', action='store_true', help='Write zeroes to --device before installation')
     parser.add_argument('--log', help='Path to optional output logfile')
     parser.add_argument('images', nargs='*', help='Paths to images defined in config. I.e. image=rootfs.tar.bz')
     args = parser.parse_args()
     
-    if args.device and not pathlib.Path(args.device).is_block_device() and not os.path.isfile(args.device):
+    if args.device and not pathlib.Path(args.device).is_block_device():
         print('device not found', file=sys.stderr)
         sys.exit(1)
     
     if args.wipefs and not args.device:
         print('missing --wipefs requirement --device')
         sys.exit(1)
-    
+
+    if args.zero_fill and not args.device:
+        print('missing --zero-fill requirement --device')
+        sys.exit(1)
+
     if args.log:
         try:
             with open(args.log, 'w') as f:
@@ -341,7 +344,7 @@ if __name__ == '__main__':
         except IOError:
             print('outout log path write access denied', file=sys.stderr)
             sys.exit(1)
-    
+
     config = yaml.load(read_config(args.config), Loader=yaml.loader.SafeLoader)
     images = split_images(args.images)
     validate_images(images)
@@ -350,7 +353,7 @@ if __name__ == '__main__':
     if is_create_partitions(config) and not args.device:
         print('missing partition create requirement --device')
         sys.exit(1)
-    
+
     to_unmount = []
     if is_create_partitions(config):
         to_unmount = mounted_partitions(starts_with=args.device)
@@ -374,15 +377,37 @@ if __name__ == '__main__':
         print('wiping partition table..')
         run_command('wipefs', ['--all', args.device])
         partprobe(args.device)
-            
+
+    if args.zero_fill:
+        print('writing zeroes to device..')
+        fd = os.open(args.device, os.O_RDWR)
+        try:
+            # Get size by seeking to end
+            size = os.lseek(fd, 0, os.SEEK_END)
+            # Rewind fd
+            os.lseek(fd, 0, os.SEEK_SET)
+            # Zero fill in blocks of [blocksize]
+            blocksize = 4096
+            buf = b'\0' * blocksize
+            remaining = size
+            print('  size: {}\n  blocksize: {}'.format(size, blocksize))
+            while remaining > 0:
+                readsize = blocksize if remaining > blocksize else remaining
+                remaining -= os.write(fd, buf[:readsize])
+            os.fsync(fd)
+        except:
+            raise
+        finally:
+            os.close(fd)
+
     if 'partitions' in config:
         create_partitions(config, args.device)
-        
+
     if 'images' in config:
         install_images(config, args.device, images)
         print('Syncing filesystem')
         run_command('sync', [])    
-    
+
     if args.log:
         config['log'] = {
             'device': args.device,
@@ -393,5 +418,5 @@ if __name__ == '__main__':
         print(f'Writing log to {args.log}')
         with open(args.log, 'w') as f:
             f.write(yaml.safe_dump(config, sort_keys=False))
-            
+
     sys.exit(0)
