@@ -23,17 +23,18 @@ print_usage() {
     echo "Usage: install-container [OPTIONS] CONTAINER"
     echo "Install container to blockdevice"
     echo "Mandatory:"
-    echo "  -d,--device       Path to target blockdevice"
+    echo "  -d,--device          Path to target blockdevice"
     echo "Optional:"
-    echo "  --any-pubkey      Flag to only use public key in container for validation -- do not match public key to known key"
-    echo "  -p,--path         Path to image-install application. By default resolve by \$PATH"
-    echo "  --key-dir         Path to directory of public keys for validating container signature"
-    echo "  --verify-device   Verify disk image to device by:"
-    echo "                      - zero full device before image installation"
-    echo "                      - do NOT execute preinstall and postinstall"
-    echo "                      - write disk image to device"
-    echo "                      - sha256 whole device and compare to disk sha256 in container"
-    echo "                      - return 0 if sha256 sums are equal"
+    echo "  --any-pubkey          Flag to only use public key in container for validation -- do not match public key to known key"
+    echo "  -p,--path             Path to image-install application. By default resolve by \$PATH"
+    echo "  --key-dir             Path to directory of public keys for validating container signature"
+    echo "  --verify-device       Verify disk image to device by:"
+    echo "                         - zero full device before image installation"
+    echo "                         - do NOT execute preinstall and postinstall"
+    echo "                         - write disk image to device"
+    echo "                         - sha256 whole device and compare to disk sha256 in container"
+    echo "                         - return 0 if sha256 sums are equal"
+    echo "  --reset-nvram-update  Reset nvram A/B update to defaults"
 }
 
 image_install="image-install"
@@ -64,6 +65,10 @@ while [ "$#" -gt 0 ]; do
 		;;
 	--verify-device)
 		verify_device="yes"
+		shift # past argument
+		;;
+	--reset-nvram-update)
+		reset_nvram_update="yes"
 		shift # past argument
 		;;
 	-*|--*)
@@ -149,6 +154,14 @@ else
 		echo "postinstall: $(readlink ${TMP}/mnt/postinstall)"
 		"${TMP}/mnt/postinstall" "$device" || die "Failed executing postinstall"
 	fi
+fi
+
+if [ "$reset_nvram_update" = "yes" ]; then
+	echo "Resetting nvram update variables"
+	NVRAM_SYSTEM_UNLOCK=16440 nvram --sys \
+		--set SYS_BOOT_PART rootfs1 \
+		--set SYS_BOOT_SWAP rootfs1 \
+		--del SYS_BOOT_ATTEMPTS || die "Failed resetting nvram"
 fi
 
 cleanup
