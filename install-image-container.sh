@@ -2,11 +2,16 @@
 # Require bash due to builtin read
 
 TMP="NONE"
+VERITY="NONE"
 
 cleanup() {
 	if [ "$TMP" != "NONE" ]; then
 		if [ -d "$TMP"/mnt ]; then
 			umount "$TMP"/mnt
+		fi
+		if [ "$VERITY" != "NONE" ]; then
+			veritysetup close "$VERITY"
+			VERITY="NONE"
 		fi
 		rm -r "$TMP"
 		TMP="NONE"
@@ -88,12 +93,43 @@ done
 
 TMP="$(mktemp -d)" || die "Failed creating tmp directory"
 
-tail --bytes 8192 "$container" > "${TMP}/signature" || die "Failed extracting signature blob"
-tail --bytes 4096 "${TMP}/signature" > "${TMP}/pub.orig" || die "Failed extracting public key"
-head --bytes 4096 "${TMP}/signature" > "${TMP}/digest" || die "Failed extracting digest"
-openssl pkey -in "${TMP}/pub.orig" -pubin -out "${TMP}/pub.der" -outform DER || die "Failed validating public key"
-pub_sha256="$(cat ${TMP}/pub.der | sha256sum)" || die "Failed calculating public key sha256"
-echo "Container public key sha256: ${pub_sha256}"
+container_size="$(stat -c %s ${container})" || die "Failed getting container size"
+tail --bytes 32 "$container" > "${TMP}/offsets" || die "Failed extracting offset blob"
+tree_offset="$(od -N 8 -A none --endian=little --format=u8 ${TMP}/offsets)" || die "Failed extracting tree offset"
+tree_offset="$(echo "$tree_offset" | tr -d ' ')" || die "Failed truncating"
+root_offset="$(od -N 8 -j 8 -A none --endian=little --format=u8 ${TMP}/offsets)" || die "Failed extracting root offset"
+root_offset="$(echo "$root_offset" | tr -d ' ')" || die "Failed truncating"
+digest_offset="$(od -N 8 -j 16 -A none --endian=little --format=u8 ${TMP}/offsets)" || die "Failed extracting digest offset"
+digest_offset="$(echo "$digest_offset" | tr -d ' ')" || die "Failed truncating"
+key_offset="$(od -N 8 -j 24 -A none --endian=little --format=u8 ${TMP}/offsets)" || die "Failed extracting key offset"
+key_offset="$(echo "$key_offset" | tr -d ' ')" || die "Failed truncating"
+
+[ $tree_offset -lt $root_offset ] || die "Invalid container, tree offset not less than root offset"
+[ $root_offset -lt $digest_offset ] || die "Invalid container, root offset not less than digest offset"
+[ $digest_offset -lt $key_offset ] || die "Invalid container, digest offset not less than key offset"
+[ $key_offset -lt $container_size ] || die "Invalid container, key offset less than container size"
+
+tree_size=$(( $root_offset - $tree_offset ))
+root_size=$(( $digest_offset - $root_offset ))
+digest_size=$(( $key_offset - $digest_offset ))
+key_size=$(( $container_size - $key_offset ))
+
+echo "Container:"
+printf " 0x%08x squashfs - %d b\n" 0 $container_size
+printf " 0x%08x tree     - %d b\n" $tree_offset $tree_size
+printf " 0x%08x root     - %d b\n" $root_offset $root_size
+printf " 0x%08x digest   - %d b\n" $digest_offset $digest_size
+printf " 0x%08x key      - %d b\n" $key_offset $key_size
+
+# Extract data for validating container
+dd "if=${container}" "of=${TMP}/container.hashtree" "bs=${tree_size}" count=1 iflag=skip_bytes "skip=${tree_offset}" || die "Failed extracting hashtree"
+dd "if=${container}" "of=${TMP}/container.roothash" "bs=${root_size}" count=1 iflag=skip_bytes "skip=${root_offset}" || die "Failed extracting roothash"
+dd "if=${container}" "of=${TMP}/container.digest" "bs=${digest_size}" count=1 iflag=skip_bytes "skip=${digest_offset}" || die "Failed extracting digest"
+dd "if=${container}" "of=${TMP}/container.key" "bs=${key_size}" count=1 iflag=skip_bytes "skip=${key_offset}" || die "Failed extracting key"
+# Validate key
+openssl pkey -in "${TMP}/container.key" -pubin -pubcheck || die "Failed validating public key"
+key_sha256="$(cat ${TMP}/container.key | sha256sum)" || die "Failed calculating public key sha256"
+echo " key sha256: ${key_sha256}"
 
 # Find matching public key if requested
 if [ "$validate_pubkey" != "no" ]; then
@@ -101,7 +137,7 @@ if [ "$validate_pubkey" != "no" ]; then
 		if openssl pkey -in "$pub" -pubcheck -pubin -noout; then
 			tmpsha256="$(cat  ${pub} | sha256sum)"
 			echo "Matching with keydir/$(basename ${pub}) sha256: ${tmpsha256}"
-			if [ "$pub_sha256" = "$tmpsha256" ]; then
+			if [ "$key_sha256" = "$tmpsha256" ]; then
 				echo "Match!"
 				foundkey="$pub"
 				break
@@ -110,22 +146,24 @@ if [ "$validate_pubkey" != "no" ]; then
 	done
 	[ "x$foundkey" != "x" ] || die "No matching public key available"
 else
-	foundkey="${TMP}/pub.der"
-fi
+	foundkey="${TMP}/container.key"
+fi	
 
 # Validate and mount container
-head --bytes=-8192 "$container" | openssl dgst -sha256 -verify "$foundkey" -signature "${TMP}/digest" || die "Failed validating container"
+openssl dgst -sha256 -verify "$foundkey" -signature "${TMP}/container.digest" \
+	"${TMP}/container.roothash" || die "Failed validating roothash"
+veritysetup open "$container" imageinstaller "${TMP}/container.hashtree" \
+	--root-hash-file "${TMP}/container.roothash" || die "Failed enabling dm-verity"
+VERITY="imageinstaller"
 mkdir "${TMP}/mnt" || die "Failed creating mnt dir"
-mount -t squashfs -o ro "$container" "${TMP}/mnt" || die "Failed mounting container" 
+mount -t squashfs -o ro /dev/mapper/imageinstaller "${TMP}/mnt" || die "Failed mounting squashfs" 
 
 # Zero device when verifying device or run preinstall in normal flow
 if [ "$verify_device" = "yes" ]; then
 	zerofill="--zero-fill"
-else
-	if [ -x "${TMP}/mnt/preinstall" ]; then
-		echo "preinstall: $(readlink ${TMP}/mnt/preinstall)"
-		"${TMP}/mnt/preinstall" "$device" || die "Failed executing preinstall"
-	fi
+else if [ -x "${TMP}/mnt/preinstall" ]; then
+	echo "preinstall: $(readlink ${TMP}/mnt/preinstall)"
+	"${TMP}/mnt/preinstall" "$device" || die "Failed executing preinstall"
 fi
 
 # Perform installation
@@ -149,11 +187,9 @@ if [ "$verify_device" = "yes" ]; then
 	echo "image sha256:  ${image_sha256}"
 	[ "$device_sha256" = "$image_sha256" ] || die "sha256 mismatch"
 	echo "Valid!"
-else
-	if [ -x "${TMP}/mnt/postinstall" ]; then
-		echo "postinstall: $(readlink ${TMP}/mnt/postinstall)"
-		"${TMP}/mnt/postinstall" "$device" || die "Failed executing postinstall"
-	fi
+else if [ -x "${TMP}/mnt/postinstall" ]; then
+	echo "postinstall: $(readlink ${TMP}/mnt/postinstall)"
+	"${TMP}/mnt/postinstall" "$device" || die "Failed executing postinstall"
 fi
 
 if [ "$reset_nvram_update" = "yes" ]; then

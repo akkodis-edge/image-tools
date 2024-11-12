@@ -87,6 +87,7 @@ done
 [ "x$build" != "x" ] || die "Missing argument -b/--build"
 [ "x$conf" != "x" ] || die "Missing argument -c/--conf"
 [ "x$container_name" != "x" ] || die "Missing argument CONTAINER"
+[ "x$keyfile" != "x" ] || die "No signing method provided"
 
 # Get size in bytes from config file:
 # disk:
@@ -128,24 +129,44 @@ if [ "x$disk_name" != "x" ]; then
 fi
 
 # Create squashfs image
-mksquashfs $artifacts "${build}/container.nosign" -noappend -all-root || die "Failed creating squashfs"
+mksquashfs $artifacts "${build}/container.squashfs" -noappend -all-root || die "Failed creating squashfs"
 
-# Sign if key provided
-sign="no"
+# Create verity data
+veritysetup --data-block-size=4096 --hash-block-size=4096 format \
+	--root-hash-file "${build}/container.roothash" "${build}/container.squashfs" \
+	"${build}/container.hashtree" || die "Failed dm-verity formatting"
+
+# Sign root hash with provided method and extract public key
 if [ "x$keyfile" != "x" ]; then
-	# Get public key in DER format and truncate to 4K blob
-	openssl pkey -in "$keyfile" -out "${build}/key.pub.der" -pubout -outform DER || die "Failed getting pubkey from key"
-	truncate --no-create -s %4096 "${build}/key.pub.der" || die "Failed truncating pubkey"
-	# Calculate and sign digest
-	openssl dgst -sha256 -out "${build}/container.digest" -sign "$keyfile" "${build}/container.nosign" || die "Failed signing digest"
-	truncate --no-create -s %4096 "${build}/container.digest" || die "Failed truncating digest"
-	sign="yes"
+	openssl pkey -in "$keyfile" -out "${build}/container.key" -pubout -outform DER || die "Failed getting pubkey from key"
+	openssl dgst -sha256 -out "${build}/container.digest" -sign "$keyfile" "${build}/container.roothash" || die "Failed signing roothash"
 fi
 
-if [ "$sign" = "yes" ]; then
-	cat "${build}/container.nosign" "${build}/container.digest" "${build}/key.pub.der" > "${build}/${container_name}" || die "Failed assembling container"
-else
-	cat "${build}/container.nosign" > "${build}/${container_name}" || die "Failed assembling container"
-fi
+# Calculate offsets in file
+squashfs_size="$(stat -c %s ${build}/container.squashfs)" || die "Failed getting squashfs size"
+tree_size="$(stat -c %s ${build}/container.hashtree)" || die "Failed getting hashtree size"
+root_size="$(stat -c %s ${build}/container.roothash)" || die "Failed getting roothash size"
+digest_size="$(stat -c %s ${build}/container.digest)" || die "Failed getting digest size"
+key_size="$(stat -c %s ${build}/container.key)" || die "Failed getting public key size"
+tree_offset=$(( $squashfs_size ))
+root_offset=$(( $tree_offset + $tree_size ))
+digest_offset=$(( $root_offset + $root_size ))
+key_offset=$(( $digest_offset + $digest_size ))
+
+echo "Container blob offsets:"
+printf " 0x%08x squashfs - %d b\n" 0 $squashfs_size
+printf " 0x%08x tree     - %d b\n" $tree_offset $tree_size
+printf " 0x%08x root     - %d b\n" $root_offset $root_size
+printf " 0x%08x digest   - %d b\n" $digest_offset $digest_size
+printf " 0x%08x key      - %d b\n" $key_offset $key_size
+
+printf "%016x" "$tree_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' | xxd -r -p > "${build}/container.offsets" || die "Failed writing offset"
+printf "%016x" "$root_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' | xxd -r -p >> "${build}/container.offsets" || die "Failed writing offset"
+printf "%016x" "$digest_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' | xxd -r -p >> "${build}/container.offsets" || die "Failed writing offset"
+printf "%016x" "$key_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' | xxd -r -p >> "${build}/container.offsets" || die "Failed writing offset"
+
+cat "${build}/container.squashfs" "${build}/container.hashtree" "${build}/container.roothash" \
+	"${build}/container.digest" "${build}/container.key" "${build}/container.offsets" \
+	> "${build}/${container_name}" || die "Failed assembling container"
 
 exit 0

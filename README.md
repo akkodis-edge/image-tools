@@ -100,15 +100,28 @@ Image format for packaging complete disk or partition images with checksum and o
 The container is a concatenated blob of:
 
 ```
-+---------------+-------+-----------------------+
-| PART          | BYTES | TYPE                  |
-+---------------+-------+-----------------------+
-| Container     | n     | squashfs              |
-+---------------+-------+-----------------------+
-| Signature     | 4K    | openssl binary digest |
-+---------------+-------+-----------------------+
-| Public key    | 4K    | DER formatted key     |
-+---------------+-------+-----------------------+
++---------------+-------+-----------------------------------+
+| PART          | BYTES | TYPE                              |
++---------------+-------+-----------------------------------+
+| container     | n     | squashfs file                     |
++---------------+-------+-----------------------------------+
+| tree          | n     | dm-verity verification data       |
++---------------+-------+-----------------------------------+
+| root          | n     | dm-verity root hash          (hex)|
++---------------+-------+-----------------------------------+
+| digest        | n     | root hash openssl digest     (bin)|
++---------------+-------+-----------------------------------+
+| key           | n     | public key of digest signer  (DER)|
++---------------+-------+-----------------------------------+
+| tree_offset   | 8     | Offset of hash_tree      (u64, LE)|
++---------------+-------+-----------------------------------+
+| root_offset   | 8     | Offset of root_hash      (u64, LE)|
++---------------+-------+-----------------------------------+
+| digest_offset | 8     | Offset of digest         (u64, LE)|
++---------------+-------+-----------------------------------+
+| key_offset    | 8     | Offset of public key     (u64, LE)|
++---------------+-------+-----------------------------------+
+
 ```
 
 make-image-container utility will output a container based on a config file describing target device.
