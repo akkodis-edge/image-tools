@@ -115,10 +115,7 @@ mount -t squashfs -o ro "$container" "${TMP}/mnt" || die "Failed mounting contai
 
 # Zero device when verifying device or run preinstall in normal flow
 if [ "$verify_device" = "yes" ]; then
-	echo "Writing zeroes to device"
-	#devicesize="$(lsblk -bno SIZE ${device})" || die "Failed getting device size"
-	#head --bytes "$devicesize" > "$device" || die "Failed zeroing drive"
-	dd if=/dev/zero of="$device" bs=4K conv=notrunc 2>/dev/null
+	zerofill="--zero-fill"
 else
 	if [ -x "${TMP}/mnt/preinstall" ]; then
 		echo "preinstall: $(readlink ${TMP}/mnt/preinstall)"
@@ -134,7 +131,7 @@ images:
      target: device
 EOM
 echo "Installing image"
-printf '%s\n' "$config" | "$image_install" --wipefs --device "$device" --config - image="${TMP}/mnt/disk.img" || die "Failed installing image"
+printf '%s\n' "$config" | "$image_install" $zerofill --force-unmount --wipefs --device "$device" --config - "image=${TMP}/mnt/disk.img" || die "Failed installing image"
 
 # Validate device sha256sum when verifying device or run postinstall in normal flow
 if [ "$verify_device" = "yes" ]; then
