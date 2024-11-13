@@ -113,6 +113,10 @@ The container is a concatenated blob of:
 +---------------+-------+-----------------------------------+
 | key           | n     | public key of digest signer  (DER)|
 +---------------+-------+-----------------------------------+
+| magic         | 4     | magic 0x494d4721         (u32, LE)|
++---------------+-------+-----------------------------------+
+| reserved      | 28    | All bytes shall be set to 0       |
++---------------+-------+-----------------------------------+
 | tree_offset   | 8     | Offset of hash_tree      (u64, LE)|
 +---------------+-------+-----------------------------------+
 | root_offset   | 8     | Offset of root_hash      (u64, LE)|
@@ -157,6 +161,8 @@ sudo ./make-image-container.sh -b build/ -c example-linux-container.yaml \
 mkdir build
 # make test key
 openssl genrsa -out build/private.pem 4096
+mkdir build/keys
+openssl rsa -in build/private.pem -pubout -out build/keys/public.pem
 # Make sample archive
 echo content1 > build/file1
 echo content2 > build/file2
@@ -170,7 +176,14 @@ sudo ./make-image-container.sh -b build/ -c test/small.yaml \
 truncate -s 21000192 build/blockdevice
 # Create loopdevice
 sudo losetup --show -P -f build/blockdevice 
-/dev/loop0
+# /dev/loop0
+# Install and validate image
+sudo ./install-image-container.sh --device /dev/loop0 --key-dir build/keys \
+	--path ./image-install.py --verify-device build/sample.container
+# Install image
+sudo ./install-image-container.sh --device /dev/loop0 --key-dir build/keys \
+	--path ./image-install.py build/sample.container
+
 
 
 

@@ -160,7 +160,9 @@ printf " 0x%08x root     - %d b\n" $root_offset $root_size
 printf " 0x%08x digest   - %d b\n" $digest_offset $digest_size
 printf " 0x%08x key      - %d b\n" $key_offset $key_size
 
-printf "%016x" "$tree_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' | xxd -r -p > "${build}/container.offsets" || die "Failed writing offset"
+printf "%08x" 0x21474d49 | xxd -r -p > "${build}/container.offsets" || die "Failed writing offset"
+dd if=/dev/zero of="${build}/container.offsets" bs=28 count=1 oflag=append conv=notrunc
+printf "%016x" "$tree_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' | xxd -r -p >> "${build}/container.offsets" || die "Failed writing offset"
 printf "%016x" "$root_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' | xxd -r -p >> "${build}/container.offsets" || die "Failed writing offset"
 printf "%016x" "$digest_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' | xxd -r -p >> "${build}/container.offsets" || die "Failed writing offset"
 printf "%016x" "$key_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' | xxd -r -p >> "${build}/container.offsets" || die "Failed writing offset"
