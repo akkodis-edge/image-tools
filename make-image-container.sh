@@ -25,10 +25,11 @@ print_usage() {
     echo ""
     echo "Mandatory:"
     echo "  -b,--build        Path to build directory, will be created if needed"
-    echo "  -c,--conf         Path to yaml config describing disk"
     echo "Optional:"
+    echo "  --partitions      Space separated list to paths of partitions"
+    echo "  -c,--conf         Path to yaml config describing disk"
     echo "  -i,--images       Space separated list of imagename=imagepath"
-    echo "                    where imagename is defined by --descriptor file."
+    echo "                    where imagename is defined by --conf file."
     echo "  -p,--path         Path to image-install application. By default resolve by \$PATH"
     echo "  --key             Path to private key for signing image"
     echo "  --disk-name       Name to use for disk image inside container"
@@ -54,6 +55,12 @@ while [ "$#" -gt 0 ]; do
 	-p|--path)
 		[ "$#" -gt 1 ] || die "Invalid argument -p/--path"
 		image_install="$2"
+		shift # past argument
+		shift # past value
+		;;
+	--partitions)
+		[ "$#" -gt 1 ] || die "Invalid argument --partitions"
+		partitions="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -100,12 +107,13 @@ done
 
 [ "$(id -u)" -eq 0 ] || die "Must be run as root"
 [ "x$build" != "x" ] || die "Missing argument -b/--build"
-[ "x$conf" != "x" ] || die "Missing argument -c/--conf"
+[ "x$conf" != "x" -a "x$partitions" != "x" ] && die "Invalid argument -c/--conf and --partitions are mutually exclusive"
+[ "x$conf" = "x" -a "x$partitions" = "x" ] && die "Missing argument -c/--conf or --partitions" 
 [ "x$container_name" != "x" ] || die "Missing argument CONTAINER"
 [ "x$keyfile" != "x" ] || die "No signing method provided"
 
 # Verify no reserved names are used
-for x in "$container_name" "$preinstall" "$postinstall"; do
+for x in "$container_name" "$preinstall" "$postinstall" $partitions; do
 	if [ "x${x}" != "x" ]; then
 		basename="$(basename ${x})" || die "Failed basename"
 		for reserved in "disk.img" "disk.img.sha256" "preinstall" "postinstall"; do
@@ -114,43 +122,49 @@ for x in "$container_name" "$preinstall" "$postinstall"; do
 	fi
 done
 
-# Get size in bytes from config file:
-# disk:
-#   size: BYTES
-cmd="from yaml import safe_load; print(safe_load(open(\"${conf}\"))['disk']['size'])"
-disk_size="$(python3 -c "$cmd")" || die "Failed reading disk size from config"
-
-disk_image="${build}/disk.img"
-if [ "x$disk_name" != "x" ]; then
-	disk_image="${build}/${disk_name}"
+if [ "x$conf" != "x" ]; then
+	# Get size in bytes from config file:
+	# disk:
+	#   size: BYTES
+	cmd="from yaml import safe_load; print(safe_load(open(\"${conf}\"))['disk']['size'])"
+	disk_size="$(python3 -c "$cmd")" || die "Failed reading disk size from config"
+	
+	disk_image="${build}/disk.img"
+	if [ "x$disk_name" != "x" ]; then
+		disk_image="${build}/${disk_name}"
+	fi
+	
+	# Prepare and mount disk as loopback device
+	mkdir -p "$build" || die "Failed creating build dir"
+	# Disk image will be sparse, remove any existing image to start from fresh sparse image
+	rm -f "$disk_image" || die "Failed removing disk image"LS
+	
+	truncate -s "$disk_size" "$disk_image" || die "Failed creating disk image"
+	LODEV="$(losetup --show -P -f ${disk_image})" || die "Failed creating loopback device"
+	
+	# Finalize disk image
+	cat "$conf"
+	echo ""
+	"$image_install" --config "$conf" --device "$LODEV" $images || die "Failed finalizing image"
+	# Remove loopback device
+	cleanup
+	
+	# Calculate checksum
+	echo "Calculating disk sha256"
+	disk_sha256="$(cat ${disk_image} | sha256sum)" || die "Failed calculating checksum"
+	echo "$disk_sha256" > "${disk_image}.sha256" || die "Failed writing sha256"
+	
+	artifacts="${disk_image} ${disk_image}.sha256"
+	# Create symlink for disk image if name provided
+	if [ "x$disk_name" != "x" ]; then
+		ln -sf "$(basename ${disk_image})" "${build}/disk.img" || die "Failed creating link"
+		ln -sf "$(basename ${disk_image}).sha256" "${build}/disk.img.sha256" || die "Failed creating link"
+		artifacts="${artifacts} ${build}/disk.img ${build}/disk.img.sha256"
+	fi
 fi
 
-# Prepare and mount disk as loopback device
-mkdir -p "$build" || die "Failed creating build dir"
-# Disk image will be sparse, remove any existing image to start from fresh sparse image
-rm -f "$disk_image" || die "Failed removing disk image"LS
-
-truncate -s "$disk_size" "$disk_image" || die "Failed creating disk image"
-LODEV="$(losetup --show -P -f ${disk_image})" || die "Failed creating loopback device"
-
-# Finalize disk image
-cat "$conf"
-echo ""
-"$image_install" --config "$conf" --device "$LODEV" $images || die "Failed finalizing image"
-# Remove loopback device
-cleanup
-
-# Calculate checksum
-echo "Calculating disk sha256"
-disk_sha256="$(cat ${disk_image} | sha256sum)" || die "Failed calculating checksum"
-echo "$disk_sha256" > "${disk_image}.sha256" || die "Failed writing sha256"
-
-artifacts="${disk_image} ${disk_image}.sha256"
-# Create symlink for disk image if name provided
-if [ "x$disk_name" != "x" ]; then
-	ln -sf "$(basename ${disk_image})" "${build}/disk.img" || die "Failed creating link"
-	ln -sf "$(basename ${disk_image}).sha256" "${build}/disk.img.sha256" || die "Failed creating link"
-	artifacts="${artifacts} ${build}/disk.img ${build}/disk.img.sha256"
+if [ "x$partitions" != "x" ]; then
+	artifacts="$partitions"
 fi
 
 # Add pre/postinstall if requested
