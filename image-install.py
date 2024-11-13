@@ -140,6 +140,8 @@ def install_raw(device, target, file, bz2=False, sparse=False):
     if type == 'label' and name is not None:
         (partname, dirpath) = split_target(name, delim='/')
         out = partlabel_to_part(partname, device=device)
+    if type == 'label-raw' and name is not None:
+        out = partlabel_to_part(name, device=device)
     if out is None:
         raise ConfigError(f'Unresolved target: {target}')
     if 'dirpath' in locals():

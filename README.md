@@ -80,6 +80,8 @@ images:
      #  label:[LABEL_OF_PARTITION]/[PATH]
      #    target partition will be mounted and image installed to mounted root/[PATH].
      #    note: label does not have to be defined in partitions section.
+     #  label-raw:[LABEL_OF_PARTITION]
+     #    image will be installed directly to partition without mounting.
      #  device
      #    root of device, i.e. /dev/sdb
      target: label:rootfs
