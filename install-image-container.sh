@@ -17,6 +17,7 @@ cleanup() {
 		TMP="NONE"
 	fi
 }
+trap cleanup EXIT
 
 die() {
 	echo "$1"
