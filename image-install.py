@@ -355,7 +355,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     to_unmount = []
-    if is_create_partitions(config):
+    if args.device or is_create_partitions(config):
         to_unmount = mounted_partitions(starts_with=args.device)
     elif 'partitions' in config and len(config['partitions']) > 0:
         mounted = mounted_partitions()
@@ -363,7 +363,7 @@ if __name__ == '__main__':
         for cpart in config['partitions']:
             block = partlabel_to_part(cpart['label'])
             if block in mounted:
-                to_unmount.append(block)   
+                to_unmount.append(block)
     if len(to_unmount) > 0:
         print('mounted partitions: ', to_unmount, sep='\n')
         if not args.force_unmount:
