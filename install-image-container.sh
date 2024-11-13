@@ -29,8 +29,11 @@ print_usage() {
     echo "Usage: install-container [OPTIONS] CONTAINER"
     echo "Install container to blockdevice"
     echo "Mandatory:"
-    echo "  -d,--device          Path to target blockdevice"
+    echo "  -d,--device           Path to target blockdevice"
     echo "Optional:"
+    echo "  -c,--conf             Path to yaml config describing disk, allows overriding full disk install. To be used with --images"
+    echo "                        Value of - means config in stdin"
+    echo "  -i,--images           Space separated list of imagename=imagepath. Relative path to image within container. To be used with --conf"
     echo "  --any-pubkey          Flag to only use public key in container for validation -- do not match public key to known key"
     echo "  -p,--path             Path to image-install application. By default resolve by \$PATH"
     echo "  --key-dir             Path to directory of public keys for validating container signature"
@@ -40,6 +43,7 @@ print_usage() {
     echo "                         - write disk image to device"
     echo "                         - sha256 whole device and compare to disk sha256 in container"
     echo "                         - return 0 if sha256 sums are equal"
+    echo "                        Warning: should only be used with full disk images and no partitions"
     echo "  --reset-nvram-update  Reset nvram A/B update to defaults"
 }
 
@@ -56,6 +60,18 @@ while [ "$#" -gt 0 ]; do
 	-p|--path)
 		[ "$#" -gt 1 ] || die "Invalid argument -p/--path"
 		image_install="$2"
+		shift # past argument
+		shift # past value
+		;;
+	-c|--conf)
+		[ "$#" -gt 1 ] || die "Invalid argument -c/--conf"
+		conf="$2"
+		shift # past argument
+		shift # past value
+		;;
+	-i|--images)
+		[ "$#" -gt 1 ] || die "Invalid argument -i/--images"
+		images="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -169,15 +185,32 @@ elif [ -x "${TMP}/mnt/preinstall" ]; then
 	"${TMP}/mnt/preinstall" "$device" || die "Failed executing preinstall"
 fi
 
-# Perform installation
-read -r -d '' config <<- EOM
+echo "Installing image"
+if [ "x$conf" != "x" ]; then
+	# Install individual partitions with config
+	if [ "$conf" = "-" ]; then
+		config="$(cat)"
+	else
+		config="$(cat ${conf})"
+	fi
+	# cd to container for relative --image paths
+	cd "${TMP}/mnt"
+	printf '%s\n' "$config" | "$image_install" --force-unmount --device "$device" --config - $images || die "Failed installing image"
+	# Return to previous dir
+	cd -
+	
+else
+	# Perform full disk installation without config
+	read -r -d '' config <<- EOM
 images:
    - name: image
      type: raw-sparse
      target: device
+     reload_partitions: true
 EOM
-echo "Installing image"
-printf '%s\n' "$config" | "$image_install" $zerofill --force-unmount --wipefs --device "$device" --config - "image=${TMP}/mnt/disk.img" || die "Failed installing image"
+	printf '%s\n' "$config" | "$image_install" $zerofill --force-unmount --wipefs --device "$device" --config - "image=${TMP}/mnt/disk.img" || die "Failed installing image"
+fi
+
 
 # Validate device sha256sum when verifying device or run postinstall in normal flow
 if [ "$verify_device" = "yes" ]; then
