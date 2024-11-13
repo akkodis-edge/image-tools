@@ -18,8 +18,6 @@ cmd_cancel=""
 cmd_rollback=""
 cmd_counter=""
 image=""
-type="tar.bz2"
-filesystem="ext4"
 
 print_usage() {
     echo "Usage: ${1} [OPTIONS] COMMAND ARGS..."
@@ -41,24 +39,15 @@ print_usage() {
 	echo " counter [VALUE]      Read or write counter. Writing counter not allowed when has-manual-counter is false"
 	echo ""
     echo "Options:"
-    echo " -t/--type            Type of image (default: ${type})"
-    echo " -f/--filesystem      Type of filesystem (default: ${filesystem})"
+    echo " -c/--container       IMAGE is of type CONTAINER"
     echo " -h/--help:           This help message"
 }
 
 while [ $# -gt 0 ]; do
 	case $1 in
-	-t|--type)
-		[ $# -gt 1 ] || die "Invalid argument -t/--type"
-		type="$2"
+	-c|--container)
+		container="yes"
 		shift # past argument
-		shift # past value
-		;;
-	-f|--filesystem)
-		[ $# -gt 1 ] || die "Invalid argument -f/--filesystem"
-		filesystem="$2"
-		shift # past argument
-		shift # past value
 		;;
 	-h|--help)
 		print_usage
@@ -184,26 +173,36 @@ if [ "$cmd_update" = "true" ]; then
 	fi
 	echo "Current root: ${current_root_label}"
 	echo "New root: ${new_root_label}"
-	# Create partitions and install image
-	read -r -d '' config <<- EOM
+	echo "Partition device and install images.."
+	device="$(lsblk -pno pkname $(findmnt -no SOURCE /))" || die "Failed getting device name" 	
+	if [ "$container" = "yes" ]; then
+		# Install container
+		read -r -d '' config <<- EOM
+images:
+   - name: image
+     type: raw-sparse
+     target: "label-raw:${new_root_label}"
+EOM
+		printf '%s\n' "$config"
+		printf '%s\n' "$config" | install-image-container --device "$device" --any-pubkey --conf - --images "image=partition.rootfs" "$image" || die "Failed installation"	
+	else
+		# Legacy mode with tar.bz2 installed to ext4 partition
+		read -r -d '' config <<- EOM
 partitions:
    - label: "${new_root_label}"
-     type: ${filesystem}
+     type: ext4
 
 images:
    - name: image
-     type: ${type}
+     type: tar.bz2
      target: "label:${new_root_label}"
 EOM
+		printf '%s\n' "$config"
+		printf '%s\n' "$config" | image-install --device "$device" --force-unmount --config - "image=${image}" || die "Failed installation"	
 
-	args="--force-unmount --config - image=${image}"
-	echo "Partition device and install images.."
-	printf '%s\n' "$config"
-	if printf '%s\n' "$config" | image-install $args; then
-		echo "Success!"
-	else
-		die "Failed installation"
-	fi	
+	fi
+	echo "Success!"
+
 	NVRAM_SYSTEM_UNLOCK=16440 nvram --sys --set SYS_BOOT_SWAP "$new_root_label" || die "Failed setting nvram variable SYS_BOOT_SWAP"
 	echo "Image written to new root partition."
 	echo "Reboot to swap"
