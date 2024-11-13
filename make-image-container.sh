@@ -21,6 +21,8 @@ die () {
 print_usage() {
     echo "Usage: image-container [OPTIONS] CONTAINER"
     echo "Make image container of disk"
+    echo "  Reserved names: disk.img disk.img.sha256 preinstall postinstall"
+    echo ""
     echo "Mandatory:"
     echo "  -b,--build        Path to build directory, will be created if needed"
     echo "  -c,--conf         Path to yaml config describing disk"
@@ -30,7 +32,8 @@ print_usage() {
     echo "  -p,--path         Path to image-install application. By default resolve by \$PATH"
     echo "  --key             Path to private key for signing image"
     echo "  --disk-name       Name to use for disk image inside container"
-    echo "                    Reserved names: disk.img disk.img.sha256 preinstall postinstall"
+    echo "  --preinstall      Path to preinstall script which will be called before image installation"
+    echo "  --postinstall     Path to postinstall script which will be called after image installation"
 }
 
 image_install="image-install"
@@ -72,6 +75,18 @@ while [ "$#" -gt 0 ]; do
 		shift # past argument
 		shift # past value
 		;;
+	--preinstall)
+		[ "$#" -gt 1 ] || die "Invalid argument --preinstall"
+		preinstall="$2"
+		shift # past argument
+		shift # past value
+		;;
+	--postinstall)
+		[ "$#" -gt 1 ] || die "Invalid argument --postinstall"
+		postinstall="$2"
+		shift # past argument
+		shift # past value
+		;;
 	-*|--*)
 		print_usage
 		exit 1
@@ -88,6 +103,16 @@ done
 [ "x$conf" != "x" ] || die "Missing argument -c/--conf"
 [ "x$container_name" != "x" ] || die "Missing argument CONTAINER"
 [ "x$keyfile" != "x" ] || die "No signing method provided"
+
+# Verify no reserved names are used
+for x in "$container_name" "$preinstall" "$postinstall"; do
+	if [ "x${x}" != "x" ]; then
+		basename="$(basename ${x})" || die "Failed basename"
+		for reserved in "disk.img" "disk.img.sha256" "preinstall" "postinstall"; do
+			[ "$x" = "$reserved" ] && die "Invalid use of reserved name ${reserved}"
+		done
+	fi
+done
 
 # Get size in bytes from config file:
 # disk:
@@ -126,6 +151,25 @@ if [ "x$disk_name" != "x" ]; then
 	ln -sf "$(basename ${disk_image})" "${build}/disk.img" || die "Failed creating link"
 	ln -sf "$(basename ${disk_image}).sha256" "${build}/disk.img.sha256" || die "Failed creating link"
 	artifacts="${artifacts} ${build}/disk.img ${build}/disk.img.sha256"
+fi
+
+# Add pre/postinstall if requested
+if [ "x$preinstall" != "x" ]; then
+	echo "Adding preinstall"
+	preinstall_basename="$(basename ${preinstall})" || die "Failed retrieving preinstall basename"
+	mkdir -p "${build}/input" || die "Failed creating build/input dir"
+	install -m 0755 "$preinstall" "${build}/input/${preinstall_basename}" || die "Failed retrieving preinstall"
+	ln -sf "$preinstall_basename" "${build}/preinstall" || die "Failed creating link"
+	artifacts="${artifacts} ${build}/preinstall ${build}/input/${preinstall_basename}"
+fi
+
+if [ "x$postinstall" != "x" ]; then
+	echo "Adding postinstall"
+	postinstall_basename="$(basename ${postinstall})" || die "Failed retrieving postinstall basename"
+	mkdir -p "${build}/input" || die "Failed creating build/input dir"
+	install -m 0755 "$postinstall" "${build}/input/${postinstall_basename}" || die "Failed retrieving postinstall"
+	ln -sf "$postinstall_basename" "${build}/postinstall" || die "Failed creating link"
+	artifacts="${artifacts} ${build}/postinstall ${build}/input/${postinstall_basename}"
 fi
 
 # Create squashfs image
