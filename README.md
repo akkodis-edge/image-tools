@@ -128,32 +128,74 @@ The container is a concatenated blob of:
 | key_offset    | 8     | Offset of public key     (u64, LE)|
 +---------------+-------+-----------------------------------+
 
-```
+The container squashfs file may include either a full disk image or partition images. Possible files:
 
-make-image-container utility will output a container based on a config file describing target device.
+Available for all:
+- postinstall: executable script run before image installation
+- preinstall: executable script run after image installation
 
-The config file needs an additional "disk" section with a "size" key describing size of disk in bytes.
+Full disk installation:
+- disk.img: sparse image of full disk
+- disk.img.sha256: sha256 of full disk. Used for verifying successfull installation.
 
-```
+Partition installation:
+- partition.NAME: Named partition. Always prefixed with "partition.". Naming depending on usage.
+                  For swap-root updates the name should be "partition.rootfs".
+
+
+Creating containers with "make-image-container".
+For full disk installation the disk layout and required filesystem images are provided by argument
+--conf and --images.
+For a simple case with a single root filesystem the description file could look like, example.yaml:
+# Device with 16GB eMMC running linux.
+# A/B root partitions and persistent data partition.
+
 disk:
-  size: 1000000
-  
+   # Size in bytes, 96% of 16GB disk.
+   # 4% capacity reserved for worst 
+   # known housekeeping overhead on eMMC.
+   size: 15360000000
+
 partitions:
-  ...
-  
+   - type: table_gpt
+   - label: rootfs1
+     type: raw
+     size: 3000
+   - label: rootfs2
+     type: raw
+     size: 3000
+   - label: data
+     type: ext4
+     size: 8000
+
 images:
-  ...
-```
+   - name: image
+     type: raw-sparse
+     target: label-raw:rootfs1
 
-See example "example-linux-container.yaml".
 
-Reference usage for the example file which will output "build/service-image-sdb8000.container".
+Creating the container based on this description file (Multiple images can be passed in, space separated):
+$ make-image-container.sh -b BUILDDIR -c example.yaml -i image=ROOTFSIMAGE --key SIGNINGKEY example-disk.container
 
-```
-sudo ./make-image-container.sh -b build/ -c example-linux-container.yaml \
-	--images "image=../sdb8000/service-image-sdb8000.rootfs.tar.bz2" \
-	--key private.pem --path ./image-install.py \
-	service-image-sdb8000.container
+Creating an update container from same ROOTFSIMAGE:
+$ make-image-container.sh -b BUILDDIR --partitions ROOTFSIMAGE --key SIGNINGKEY example-update.container
+
+Signatures for container are normally expected to be verified by a list of known and trusted public keys.
+Location of the public keys is passed in by --key-dir argument. It is possible to use public key embedded in container by
+flag --any-pubkey and thus trust any container, in that case the signature is only for validating integrity.T
+The images are installed to full disk target by:$$ install-image-container.sh -d BLOCKDEVICE --key-dir PUBKEYDIR
+
+Root update is performed by:
+$ swap-root update --container example-update.container
+
+For validation purposes before releasing full disk images to factory the installation is verified by
+comparing resulting sha256 of disk with provided disk.img.sha256 inside the container.
+Note: In this step no preinstall or postinstall scripts are executed.
+$ install-image-container.sh -d BLOCKDEVICE --key-dir PUBKEYDIR --verify-device
+
+It is the responsibility of preinstall and postinstall scripts to return non-zero exit code on errors.
+An exit code of zero means the execution was successful.
+
 ```
 
 ### Run tests
@@ -185,9 +227,4 @@ sudo ./install-image-container.sh --device /dev/loop0 --key-dir build/keys \
 # Install image
 sudo ./install-image-container.sh --device /dev/loop0 --key-dir build/keys \
 	--path ./image-install.py build/sample.container
-
-
-
-
-
 ```
