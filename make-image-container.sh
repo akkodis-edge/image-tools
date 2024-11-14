@@ -122,6 +122,8 @@ for x in "$container_name" "$preinstall" "$postinstall" $partitions; do
 	fi
 done
 
+mkdir -p "$build" || die "Failed creating build dir"
+
 if [ "x$conf" != "x" ]; then
 	# Get size in bytes from config file:
 	# disk:
@@ -133,9 +135,7 @@ if [ "x$conf" != "x" ]; then
 	if [ "x$disk_name" != "x" ]; then
 		disk_image="${build}/${disk_name}"
 	fi
-	
-	# Prepare and mount disk as loopback device
-	mkdir -p "$build" || die "Failed creating build dir"
+
 	# Disk image will be sparse, remove any existing image to start from fresh sparse image
 	rm -f "$disk_image" || die "Failed removing disk image"LS
 	
