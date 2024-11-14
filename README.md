@@ -131,12 +131,12 @@ The container is a concatenated blob of:
 The container squashfs file may include either a full disk image or partition images. Possible files:
 
 Available for all:
-- postinstall: executable script run before image installation
-- preinstall: executable script run after image installation
+- preinstall: executable script run before image installation
+- postinstall: executable script run after image installation
 
 Full disk installation:
 - disk.img: sparse image of full disk
-- disk.img.sha256: sha256 of full disk. Used for verifying successfull installation.
+- disk.img.sha256: sha256 of full disk. Used for verifying successful installation.
 
 Partition installation:
 - partition.NAME: Named partition. Always prefixed with "partition.". Naming depending on usage.
@@ -182,8 +182,9 @@ $ make-image-container.sh -b BUILDDIR --partitions ROOTFSIMAGE --key SIGNINGKEY 
 
 Signatures for container are normally expected to be verified by a list of known and trusted public keys.
 Location of the public keys is passed in by --key-dir argument. It is possible to use public key embedded in container by
-flag --any-pubkey and thus trust any container, in that case the signature is only for validating integrity.T
-The images are installed to full disk target by:$$ install-image-container.sh -d BLOCKDEVICE --key-dir PUBKEYDIR
+flag --any-pubkey and thus trust any container, in that case the signature is only for validating integrity.
+The images are installed to full disk target by:
+$ install-image-container.sh -d BLOCKDEVICE --key-dir PUBKEYDIR
 
 Root update is performed by:
 $ swap-root update --container example-update.container
