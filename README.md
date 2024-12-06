@@ -199,6 +199,16 @@ An exit code of zero means the execution was successful.
 
 ```
 
+### simple-container.sh
+Skeleton utility providing a base for creating more advanced processing of image files to be deployed. In the provided form it simply repackages a tar archived rootfs into a preformatted filesystem image which is then provided as a full disk and update container.
+
+Example usage:
+
+```
+sample/simple-container.sh --build build --path ./ --image service-image-rv8007.rootfs.tar.bz2 --name service-v0.0.1
+
+```
+
 ### Run tests
 
 ```
