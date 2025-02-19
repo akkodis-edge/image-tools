@@ -25,7 +25,7 @@ print_usage() {
 	echo "  --disk-size       Size of disk in GB (Note: NOT GiB). Default: ${disk_size_gb}"
 	echo "  --rootfs-size     Size of rootfs in MiB. Default: ${rootfs_size_mib}"
 	echo "  --data-size       Size of data in MiB. Default: ${data_size_mib}"
-
+	echo "  --disk-conf       Path to disk config file."
 }
 
 while [ "$#" -gt 0 ]; do
@@ -86,6 +86,12 @@ while [ "$#" -gt 0 ]; do
 		shift # past argument
 		shift # past value
 		;;
+	--disk-conf)
+		[ "$#" -gt 1 ] || die "Invalid argument --disk-conf)"
+		disk_conf="$2"
+		shift # past argument
+		shift # past value
+		;;
 	*)
 		print_usage
 		exit 1
@@ -108,10 +114,11 @@ if [ "x$keyfile" = "x" ]; then
 	openssl genrsa -out "$keyfile" 4096 || die "Failed generating key"
 fi
 
-# Prepare disk configuration which describes disk layout and
-# what payloads to install.
-disk_size_bytes_weighted=$(echo "scale=0; ${disk_size_gb}*1000000000*0.96/1" | bc) || die "Failed calculating disk size"
-cat << EOF > "${build}/disk-conf.yaml"
+if [ "x$disk_conf" = "x" ]; then
+	# Prepare disk configuration which describes disk layout and
+	# what payloads to install.
+	disk_size_bytes_weighted=$(echo "scale=0; ${disk_size_gb}*1000000000*0.96/1" | bc) || die "Failed calculating disk size"
+	cat << EOF > "${build}/disk-conf.yaml"
 # Device with ${disk_size_gb}GB storage..
 # A/B root partitions and persistent data partition.
 
@@ -141,6 +148,8 @@ images:
      type: raw-sparse
      target: label-raw:data
 EOF
+	disk_conf="${build}/disk-conf.yaml"
+fi
 
 # Due to the disk being created is 4% smaller than
 # actual device the gpt secondary header will not be
@@ -183,7 +192,7 @@ sudo mkfs.ext4 -F -b 4096 "${build}/partition.data" -d "${build}/data" || die "F
 # Make full disk installation container
 if [ "$no_disk" != "yes" ]; then
 	sudo "${path}/make-image-container.sh" -b "${build}/build-disk" \
-		-c "${build}/disk-conf.yaml" -i "rootfs=${build}/partition.rootfs data=${build}/partition.data" --postinstall "${build}/fix-gpt.sh" \
+		-c "$disk_conf" -i "rootfs=${build}/partition.rootfs data=${build}/partition.data" --postinstall "${build}/fix-gpt.sh" \
 		-p "${path}/image-install.py" --key "$keyfile" "${name}-disk.container" || die "Failed creating full disk container"
 fi
 
