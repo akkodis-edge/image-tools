@@ -110,7 +110,7 @@ done
 
 TMP="$(mktemp -d)" || die "Failed creating tmp directory"
 
-container_size="$(stat -c %s ${container})" || die "Failed getting container size"
+container_size="$(stat -L -c %s ${container})" || die "Failed getting container size"
 tail --bytes 64 "$container" > "${TMP}/offsets" || die "Failed extracting offset blob"
 magic="$(od -N 4 -A none --endian=little --format=u4 ${TMP}/offsets)" || die "Failed extracting tree offset"
 magic="$(printf '0x%08x' ${magic})" || die "Failed converting magic"
