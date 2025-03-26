@@ -188,7 +188,25 @@ def install_android_sparse(device, target, file, bz2=False):
                     raise OSError(f'bzcat exited with {dd.returncode}')
     else:
         run_command('simg2img', [file, out])
-    
+
+def install_raw_bmap(device, target, file):
+    (type, name) = split_target(target)
+    out = None
+    if type == 'device' and name is None and device:
+        out = device
+    if type == 'label' and name is not None:
+        (partname, dirpath) = split_target(name, delim='/')
+        out = partlabel_to_part(partname, device=device)
+    if type == 'label-raw' and name is not None:
+        out = partlabel_to_part(name, device=device)
+    if out is None:
+        raise ConfigError(f'Unresolved target: {target}')
+    if 'dirpath' in locals():
+        with mount(out) as path:
+            run_command('bmaptool', ['copy', file, f'{path}/{dirpath}'])
+    else:
+        run_command('bmaptool', ['copy', file, out])
+
 def install_android_sparse_bz2(device, target, file):
     install_android_sparse(device, target, file, bz2=True)
     
@@ -200,6 +218,7 @@ image_types = {
     'raw-sparse.bz2': install_raw_sparse_bz2,
     'android-sparse': install_android_sparse,
     'android-sparse.bz2': install_android_sparse_bz2,
+    'raw-bmap': install_raw_bmap,
 }
 
 def read_config(path):
