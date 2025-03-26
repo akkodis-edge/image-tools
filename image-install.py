@@ -38,6 +38,15 @@ def make_ext4(partition, config):
     if config['fslabel']:
         args.extend(['-L', config['label']])
     args.append(partition)
+    extended_options = []
+    # Hint that storage may not be pre-zeroed
+    extended_options.append('assume_storage_prezeroed=0')
+    # Fully initialize inode table now and not on first mount
+    extended_options.append('lazy_itable_init=0')
+    # Fully initialize journal now and not on first mount
+    extended_options.append('lazy_journal_init=0')
+    if len(extended_options) > 0:
+        args.extend(['-E', str.join(',', extended_options)])
     run_command('mkfs.ext4', args)
     
 def make_raw(partition, config):
