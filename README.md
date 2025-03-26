@@ -137,10 +137,12 @@ Available for all:
 Full disk installation:
 - disk.img: sparse image of full disk
 - disk.img.sha256: sha256 of full disk. Used for verifying successful installation.
+- disk.img.bmap: blockmap file for installation with bmaptool
 
 Partition installation:
-- partition.NAME: Named partition. Always prefixed with "partition.". Naming depending on usage.
-                  For swap-root updates the name should be "partition.rootfs".
+- partition.NAME:      Named partition. Always prefixed with "partition.". Naming depending on usage.
+                       For swap-root updates the name should be "partition.rootfs".
+- partition.NAME.bmap: blockmap file for installation with bmaptool
 
 
 Creating containers with "make-image-container".
@@ -170,7 +172,7 @@ partitions:
 
 images:
    - name: image
-     type: raw-sparse
+     type: raw-bmap
      target: label-raw:rootfs1
 
 
@@ -213,7 +215,7 @@ sample/simple-container.sh --build build --path ./ --image service-image-rv8007.
 
 ```
 # prepare build
-mkdir build
+mkdir -p build/keys
 # make test key
 openssl genrsa -out build/private.pem 4096
 mkdir build/keys

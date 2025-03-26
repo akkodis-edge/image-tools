@@ -21,7 +21,7 @@ die () {
 print_usage() {
     echo "Usage: image-container [OPTIONS] CONTAINER"
     echo "Make image container of disk"
-    echo "  Reserved names: disk.img disk.img.sha256 preinstall postinstall"
+    echo "  Reserved names: disk.img disk.img.sha256 disk.img.bmap preinstall postinstall"
     echo ""
     echo "Mandatory:"
     echo "  -b,--build        Path to build directory, will be created if needed"
@@ -116,7 +116,7 @@ done
 for x in "$container_name" "$preinstall" "$postinstall" $partitions; do
 	if [ "x${x}" != "x" ]; then
 		basename="$(basename ${x})" || die "Failed basename"
-		for reserved in "disk.img" "disk.img.sha256" "preinstall" "postinstall"; do
+		for reserved in "disk.img" "disk.img.sha256" "disk.img.bmap" "preinstall" "postinstall"; do
 			[ "$x" = "$reserved" ] && die "Invalid use of reserved name ${reserved}"
 		done
 	fi
@@ -153,18 +153,29 @@ if [ "x$conf" != "x" ]; then
 	echo "Calculating disk sha256"
 	disk_sha256="$(cat ${disk_image} | sha256sum)" || die "Failed calculating checksum"
 	echo "$disk_sha256" > "${disk_image}.sha256" || die "Failed writing sha256"
-	
-	artifacts="${disk_image} ${disk_image}.sha256"
+
+	# Create bmap
+	echo "Creating bmap"
+	bmaptool create -o "${disk_image}.bmap" "$disk_image" || die "Failed creating bmap"
+
+	artifacts="${disk_image} ${disk_image}.sha256 ${disk_image}.bmap"
 	# Create symlink for disk image if name provided
 	if [ "x$disk_name" != "x" ]; then
 		ln -sf "$(basename ${disk_image})" "${build}/disk.img" || die "Failed creating link"
 		ln -sf "$(basename ${disk_image}).sha256" "${build}/disk.img.sha256" || die "Failed creating link"
+		ln -sf "$(basename ${disk_image}).bmap" "${build}/disk.img.bmap" || die "Failed creating link"
 		artifacts="${artifacts} ${build}/disk.img ${build}/disk.img.sha256"
 	fi
 fi
 
 if [ "x$partitions" != "x" ]; then
-	artifacts="$partitions"
+	artifacts=""
+	# Create bmap file for each partition
+	for part in $partitions; do
+		part_basename="$(basename "$part")" || die "Failed getting partition basename"
+		bmaptool create -o "${build}/${part_basename}.bmap" "$part" || die "Failed creating bmap"
+		artifacts="${artifacts} ${part} ${build}/${part_basename}.bmap"
+	done
 fi
 
 # Add pre/postinstall if requested

@@ -180,7 +180,7 @@ if [ "$cmd_update" = "true" ]; then
 		read -r -d '' config <<- EOM
 images:
    - name: image
-     type: raw-sparse
+     type: raw-bmap
      target: "label-raw:${new_root_label}"
 EOM
 		printf '%s\n' "$config"

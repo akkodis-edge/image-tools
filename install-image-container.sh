@@ -204,7 +204,7 @@ else
 	read -r -d '' config <<- EOM
 images:
    - name: image
-     type: raw-sparse
+     type: raw-bmap
      target: device
      reload_partitions: true
 EOM
