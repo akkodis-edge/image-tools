@@ -90,7 +90,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-current_root_label="$(findmnt -no PARTLABEL /)" || die "Failed finding current root partition label"
+# Find root device
+if [ "$(findmnt -no FSTYPE /)" = "overlay" -a -d /rootfs.dev ]; then
+	current_root_label="$(findmnt -no PARTLABEL /rootfs.dev)" || die "Failed finding current root partition label"
+else
+	current_root_label="$(findmnt -no PARTLABEL /)" || die "Failed finding current root partition label"
+fi
+
 case "${current_root_label}" in
 	rootfs1)
 		new_root_label="rootfs2"
@@ -100,7 +106,7 @@ case "${current_root_label}" in
 		;;
 	*)
 		# Early abort wanted in case of non-rootfs boot
-		die "Unsupported root partition: ${current_root}"
+		die "Unsupported root partition: ${current_root_label}"
 		;;
 esac
 
