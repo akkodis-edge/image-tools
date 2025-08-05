@@ -93,8 +93,10 @@ done
 # Find root device
 if [ "$(findmnt -no FSTYPE /)" = "overlay" -a -d /rootfs.dev ]; then
 	current_root_label="$(findmnt -no PARTLABEL /rootfs.dev)" || die "Failed finding current root partition label"
+	current_root_device="$(findmnt -no SOURCE /rootfs.dev)" || die "Failed finding current root device"
 else
 	current_root_label="$(findmnt -no PARTLABEL /)" || die "Failed finding current root partition label"
+	current_root_device="$(findmnt -no SOURCE /)" || die "Failed finding current root device"
 fi
 
 case "${current_root_label}" in
@@ -177,10 +179,10 @@ if [ "$cmd_update" = "true" ]; then
 	if [ "$state" != "NORMAL" ]; then
 		die "Invalid state \""$state"\" for update"
 	fi
-	echo "Current root: ${current_root_label}"
-	echo "New root: ${new_root_label}"
+	echo "Device:       $current_root_device"
+	echo "Current root: $current_root_label"
+	echo "New root:     $new_root_label"
 	echo "Partition device and install images.."
-	device="$(lsblk -pno pkname $(findmnt -no SOURCE /))" || die "Failed getting device name" 	
 	if [ "$container" = "yes" ]; then
 		# Install container
 		read -r -d '' config <<- EOM
@@ -190,7 +192,7 @@ images:
      target: "label-raw:${new_root_label}"
 EOM
 		printf '%s\n' "$config"
-		printf '%s\n' "$config" | install-image-container --device "$device" --any-pubkey --conf - --images "image=partition.rootfs" "$image" || die "Failed installation"	
+		printf '%s\n' "$config" | install-image-container --device "$current_root_device" --any-pubkey --conf - --images "image=partition.rootfs" "$image" || die "Failed installation"
 	else
 		# Legacy mode with tar.bz2 installed to ext4 partition
 		read -r -d '' config <<- EOM
@@ -204,7 +206,7 @@ images:
      target: "label:${new_root_label}"
 EOM
 		printf '%s\n' "$config"
-		printf '%s\n' "$config" | image-install --device "$device" --force-unmount --config - "image=${image}" || die "Failed installation"	
+		printf '%s\n' "$config" | image-install --device "$current_root_device" --force-unmount --config - "image=${image}" || die "Failed installation"
 
 	fi
 	echo "Success!"
