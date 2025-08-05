@@ -93,11 +93,12 @@ done
 # Find root device
 if [ "$(findmnt -no FSTYPE /)" = "overlay" -a -d /rootfs.dev ]; then
 	current_root_label="$(findmnt -no PARTLABEL /rootfs.dev)" || die "Failed finding current root partition label"
-	current_root_device="$(findmnt -no SOURCE /rootfs.dev)" || die "Failed finding current root device"
+	current_root_partition="$(findmnt -no SOURCE /rootfs.dev)" || die "Failed finding current root partition"
 else
 	current_root_label="$(findmnt -no PARTLABEL /)" || die "Failed finding current root partition label"
-	current_root_device="$(findmnt -no SOURCE /)" || die "Failed finding current root device"
+	current_root_partition="$(findmnt -no SOURCE /)" || die "Failed finding current root partition"
 fi
+current_root_device="$(lsblk -pno pkname "$current_root_partition")" || die "Failed finding current root device"
 
 case "${current_root_label}" in
 	rootfs1)
