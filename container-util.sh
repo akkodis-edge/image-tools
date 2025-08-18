@@ -59,7 +59,7 @@ print_usage() {
 	echo "Options:"
 	echo "  -f,--force         Replace existing header"
 	echo "  -d,--debug         Debug output"
-	echo " --validate          Verify signature"
+	echo " --verify            Verify signature"
 	echo " --create            Create signature"
 	echo " --keyfile           Path to signing key"
 	echo " --pubkey            Path to validation key"
