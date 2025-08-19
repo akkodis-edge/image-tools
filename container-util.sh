@@ -1,10 +1,9 @@
 #!/bin/sh
 
-# Test:
-# - file with header
-# - file without header
-# - file with corrupt header
-# - file too small to include header
+ENOENT=2
+EBADF=9
+EFAULT=14
+EINVAL=22
 
 TMPDIR="NONE"
 
@@ -16,9 +15,9 @@ cleanup() {
 }
 
 die () {
-	echo "$1"
+	echo "$2"
 	cleanup
-	exit 1
+	exit $1
 }
 
 # Expects arguments:
@@ -65,6 +64,14 @@ print_usage() {
 	echo " --pubkey            Path to validation key"
 	echo " --pubkey-dir        Path to directory with valid keys"
 	echo " --pubkey-any        Use pubkey from header"
+	echo ""
+	echo "Return value:"
+	echo " 0 for success or error code"
+	echo "Error codes:"
+	echo " 2  (ENOENT): No such file (or no permission)"
+	echo " 9  (EBADF):  Corrupt input FILE"
+	echo " 14 (EFAULT): Operation failed"
+	echo " 22 (EINVAL): Invalid argument"
 }
 
 arg_force="no"
@@ -90,19 +97,19 @@ while [ "$#" -gt 0 ]; do
 		shift # past argument
 		;;
 	--keyfile)
-		[ "$#" -gt 1 ] || die "Invalid argument --keyfile"
+		[ "$#" -gt 1 ] || die $EINVAL "Invalid argument --keyfile"
 		arg_keyfile="$2"
 		shift # past argument
 		shift # past value
 		;;
 	--pubkey)
-		[ "$#" -gt 1 ] || die "Invalid argument --pubkey"
+		[ "$#" -gt 1 ] || die $EINVAL "Invalid argument --pubkey"
 		arg_pubkey="$2"
 		shift # past argument
 		shift # past value
 		;;
 	--pubkey-dir)
-		[ "$#" -gt 1 ] || die "Invalid argument --pubkey-dir"
+		[ "$#" -gt 1 ] || die $EINVAL "Invalid argument --pubkey-dir"
 		arg_pubkey_dir="$2"
 		shift # past argument
 		shift # past value
@@ -117,7 +124,7 @@ while [ "$#" -gt 0 ]; do
 		;;
 	-*|--*)
 		print_usage
-		exit 1
+		exit $EINVAL
 		;;
 	*)
 		arg_file="$1"
@@ -126,40 +133,40 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ "x$arg_file" != "x" ] ||  die "Missing mandatory argument FILE"
-[ "x$arg_cmd" != "x" ] ||  die "No operation specified, see --verify"
+[ "x$arg_file" != "x" ] ||  die $EINVAL "Missing mandatory argument FILE"
+[ "x$arg_cmd" != "x" ] ||  die $EINVAL "No operation specified, see --verify"
 if [ "$arg_cmd" = "create" ]; then
-	[ "x$arg_keyfile" != "x" ] || die "--create requires --keyfile"
+	[ "x$arg_keyfile" != "x" ] || die $EINVAL "--create requires --keyfile"
 	# Do not care who signed input file (if already signed)
 	arg_pubkey_any="yes"
 fi
 
-[ "$arg_pubkey_any" != "yes" -a "x$arg_pubkey" = "x" -a "x$arg_pubkey_dir" = "x" ] && die "No pubkey method provided, see --pubkey*"
+[ "$arg_pubkey_any" != "yes" -a "x$arg_pubkey" = "x" -a "x$arg_pubkey_dir" = "x" ] && die $EINVAL "No pubkey method provided, see --pubkey*"
 
 # Create workspace
-TMPDIR="$(mktemp -d)" || die "Failed creating temp dir"
+TMPDIR="$(mktemp -d)" || die $EFAULT "Failed creating temp dir"
 
 # Check if FILE has existing header
 file_state="UNKNOWN"
-total_size="$(stat -L -c %s "$arg_file")" || die "Failed getting container size"
+total_size="$(stat -L -c %s "$arg_file")" || die $ENOENT "Failed getting container size"
 file_size="$total_size"
 if [ "$total_size" -gt 64 ]; then
 	# Validate header magic
-	tail --bytes 64 "$arg_file" > "${TMPDIR}/offsets" || die "Failed extracting offset blob"
-	magic="$(od -N 4 -A none --endian=little --format=u4 "${TMPDIR}/offsets")" || die "Failed extracting header magic"
-	magic="$(printf '0x%08x' "$magic")" || die "Failed processing header magic"
+	tail --bytes 64 "$arg_file" > "${TMPDIR}/offsets" || die $ENOENT  "Failed extracting offset blob"
+	magic="$(od -N 4 -A none --endian=little --format=u4 "${TMPDIR}/offsets")" || die $EFAULT "Failed extracting header magic"
+	magic="$(printf '0x%08x' "$magic")" || die $EFAULT "Failed processing header magic"
 	if [ "$magic" = 0x494d4721 ]; then
 		# Set state as invalid until verified
 		file_state="INVALID"
 		# Extract offsets
-		tree_offset="$(od -N 8 -j 32 -A none --endian=little --format=u8 "${TMPDIR}/offsets")" || die "Failed extracting tree offset"
-		tree_offset="$(echo "$tree_offset" | tr -d ' ')" || die "Failed processing tree offset"
-		root_offset="$(od -N 8 -j 40 -A none --endian=little --format=u8 "${TMPDIR}/offsets")" || die "Failed extracting root offset"
-		root_offset="$(echo "$root_offset" | tr -d ' ')" || die "Failed processing root offset"
-		digest_offset="$(od -N 8 -j 48 -A none --endian=little --format=u8 "${TMPDIR}/offsets")" || die "Failed extracting digest offset"
-		digest_offset="$(echo "$digest_offset" | tr -d ' ')" || die "Failed processing digest offset"
-		key_offset="$(od -N 8 -j 56 -A none --endian=little --format=u8 "${TMPDIR}/offsets")" || die "Failed extracting key offset"
-		key_offset="$(echo "$key_offset" | tr -d ' ')" || die "Failed processing key offset"
+		tree_offset="$(od -N 8 -j 32 -A none --endian=little --format=u8 "${TMPDIR}/offsets")" || die $EFAULT "Failed extracting tree offset"
+		tree_offset="$(echo "$tree_offset" | tr -d ' ')" || die $EFAULT "Failed processing tree offset"
+		root_offset="$(od -N 8 -j 40 -A none --endian=little --format=u8 "${TMPDIR}/offsets")" || die $EFAULT "Failed extracting root offset"
+		root_offset="$(echo "$root_offset" | tr -d ' ')" || die $EFAULT "Failed processing root offset"
+		digest_offset="$(od -N 8 -j 48 -A none --endian=little --format=u8 "${TMPDIR}/offsets")" || die $EFAULT "Failed extracting digest offset"
+		digest_offset="$(echo "$digest_offset" | tr -d ' ')" || die $EFAULT "Failed processing digest offset"
+		key_offset="$(od -N 8 -j 56 -A none --endian=little --format=u8 "${TMPDIR}/offsets")" || die $EFAULT "Failed extracting key offset"
+		key_offset="$(echo "$key_offset" | tr -d ' ')" || die $EFAULT "Failed processing key offset"
 
 		# Validate offsets
 		if [ "$tree_offset" -ge "$root_offset" ]; then
@@ -189,11 +196,11 @@ if [ "$total_size" -gt 64 ]; then
 
 			# Extract blobs
 			dd "if=$arg_file" "of=${TMPDIR}/roothash" "bs=$root_size" count=1 iflag=skip_bytes \
-				"skip=$root_offset" status=none || die "Failed extracting root blob"
+				"skip=$root_offset" status=none || die $EFAULT "Failed extracting root blob"
 			dd "if=$arg_file" "of=${TMPDIR}/digest" "bs=$digest_size" count=1 iflag=skip_bytes \
-				"skip=$digest_offset" status=none || die "Failed extracting digest blob"
+				"skip=$digest_offset" status=none || die $EFAULT "Failed extracting digest blob"
 			dd "if=$arg_file" "of=${TMPDIR}/pubkey" "bs=$key_size" count=1 iflag=skip_bytes \
-				"skip=$key_offset" status=none || die "Failed extracting key blob"
+				"skip=$key_offset" status=none || die $EFAULT "Failed extracting key blob"
 
 			# Find pubkey to use for validation
 			validation_pubkey=""
@@ -218,7 +225,7 @@ if [ "$total_size" -gt 64 ]; then
 						fi
 					done
 				else
-					die "No pubkey method provided, see --pubkey*"
+					die $EINVAL "No pubkey method provided, see --pubkey*"
 				fi
 			fi
 
@@ -253,41 +260,41 @@ if [ "$arg_cmd" = "verify" ]; then
 	if [ "$file_state" = "VALID" ]; then
 		echo "File verified OK"
 	else
-		die "File verification failed"
+		die $EBADF "File verification failed"
 	fi
 # CREATE
 elif [ "$arg_cmd" = "create" ]; then
 	if [ "$file_state" = "VALID" ]; then
 		if [ "$arg_force" != "yes" ]; then
-			die "Valid header found, not overwriting. Use --force to override."
+			die $ENOENT "Valid header found, not overwriting. Use --force to override."
 		else
 			[ "$arg_debug" = "yes" ] && echo "Deleting existing header"
-			truncate --size "$file_size" "$arg_file" || die "Failed truncating FILE"
+			truncate --size "$file_size" "$arg_file" || die $EFAULT "Failed truncating FILE"
 		fi
 	fi
 
 	# Cleanup tmpdir contents
-	rm -f "${TMPDIR}/roothash" || die "Failed removing tmpfile"
-	rm -f "${TMPDIR}/digest" || die "Failed removing tmpfile"
-	rm -f "${TMPDIR}/pubkey"  || die "Failed removing tmpfile"
-	rm -f "${TMPDIR}/tree"  || die "Failed removing tmpfile"
-	rm -f "${TMPDIR}/offsets"  || die "Failed removing tmpfile"
+	rm -f "${TMPDIR}/roothash" || die $EFAULT "Failed removing tmpfile"
+	rm -f "${TMPDIR}/digest" || die $EFAULT "Failed removing tmpfile"
+	rm -f "${TMPDIR}/pubkey"  || die $EFAULT "Failed removing tmpfile"
+	rm -f "${TMPDIR}/tree"  || die $EFAULT "Failed removing tmpfile"
+	rm -f "${TMPDIR}/offsets"  || die $EFAULT "Failed removing tmpfile"
 	# Generate roothash and hashtree
 	PATH="${PATH}:/usr/sbin" veritysetup --data-block-size=4096 --hash-block-size=4096 format \
-		--root-hash-file "${TMPDIR}/roothash" "$arg_file" "${TMPDIR}/tree" || die "Failed dm-verify formatting"
+		--root-hash-file "${TMPDIR}/roothash" "$arg_file" "${TMPDIR}/tree" || die $EFAULT "Failed dm-verify formatting"
 	# Sign roothash and extract public key
 	if [ "x$arg_keyfile" != "x" ]; then
-		openssl pkey -in "$arg_keyfile" -out "${TMPDIR}/pubkey" -pubout -outform DER || die "Failed extracting --keyfile pubkey"
-		openssl dgst -sha256 -out "${TMPDIR}/digest" -sign "$arg_keyfile" "${TMPDIR}/roothash" || die "Failed signing roothash"
+		openssl pkey -in "$arg_keyfile" -out "${TMPDIR}/pubkey" -pubout -outform DER || die $ENOENT "Failed extracting --keyfile pubkey"
+		openssl dgst -sha256 -out "${TMPDIR}/digest" -sign "$arg_keyfile" "${TMPDIR}/roothash" || die $EFAULT "Failed signing roothash"
 	else
-		die "No signing method provided"
+		die $EINVAL "No signing method provided"
 	fi
 
 	# Get section sizes
-	tree_size="$(stat -c %s ${TMPDIR}/tree)" || die "Failed getting hashtree size"
-	root_size="$(stat -c %s ${TMPDIR}/roothash)" || die "Failed getting roothash size"
-	digest_size="$(stat -c %s ${TMPDIR}/digest)" || die "Failed getting digest size"
-	key_size="$(stat -c %s ${TMPDIR}/pubkey)" || die "Failed getting public key size"
+	tree_size="$(stat -c %s ${TMPDIR}/tree)" || die $EFAULT "Failed getting hashtree size"
+	root_size="$(stat -c %s ${TMPDIR}/roothash)" || die $EFAULT "Failed getting roothash size"
+	digest_size="$(stat -c %s ${TMPDIR}/digest)" || die $EFAULT "Failed getting digest size"
+	key_size="$(stat -c %s ${TMPDIR}/pubkey)" || die $EFAULT "Failed getting public key size"
 
 	# Calculate offsets in file
 	tree_offset="$file_size"
@@ -305,22 +312,22 @@ elif [ "$arg_cmd" = "create" ]; then
 	fi
 
 	# Serialize offsets
-	printf "%08x" 0x21474d49 | xxd -r -p > "${TMPDIR}/offsets" || die "Failed writing offset"
+	printf "%08x" 0x21474d49 | xxd -r -p > "${TMPDIR}/offsets" || die $EFAULT "Failed writing offset"
 	dd if=/dev/zero of="${TMPDIR}/offsets" bs=28 count=1 oflag=append conv=notrunc
 	printf "%016x" "$tree_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' \
-		| xxd -r -p >> "${TMPDIR}/offsets" || die "Failed writing offset"
+		| xxd -r -p >> "${TMPDIR}/offsets" || die $EFAULT "Failed writing offset"
 	printf "%016x" "$root_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' \
-		| xxd -r -p >> "${TMPDIR}/offsets" || die "Failed writing offset"
+		| xxd -r -p >> "${TMPDIR}/offsets" || die $EFAULT "Failed writing offset"
 	printf "%016x" "$digest_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' \
-		| xxd -r -p >> "${TMPDIR}/offsets" || die "Failed writing offset"
+		| xxd -r -p >> "${TMPDIR}/offsets" || die $EFAULT "Failed writing offset"
 	printf "%016x" "$key_offset" | sed 's@\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)@0x\8\7\6\5\4\3\2\1@' \
-		| xxd -r -p >> "${TMPDIR}/offsets" || die "Failed writing offset"
+		| xxd -r -p >> "${TMPDIR}/offsets" || die $EFAULT "Failed writing offset"
 
 	# Assembly output file
 	cat "${TMPDIR}/tree" "${TMPDIR}/roothash" "${TMPDIR}/digest" "${TMPDIR}/pubkey" "${TMPDIR}/offsets" \
-		>> "$arg_file" || die "Failed appending header"
+		>> "$arg_file" || die $EFAULT "Failed appending header"
 else
-	die "Invalid argument"
+	die $EINVAL "Invalid argument"
 fi
 
 cleanup

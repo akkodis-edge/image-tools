@@ -9,10 +9,35 @@ from subprocess import CalledProcessError
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
-def container_util_verify(container, public_key):
-    args = ['./container-util.sh', '--verify', '--pubkey', public_key, container]
-    r = subprocess.run(args, capture_output=True, text=True, check=True)
+class ENOENT(Exception):
+    pass
+class EBADF(Exception):
+    pass
+class EFAULT(Exception):
+    pass
+class EINVAL(Exception):
+    pass
+class EUNKNOWN(Exception):
+    pass
+
+def container_util(args):
+    largs = ['./container-util.sh']
+    largs.extend(args)
+    r = subprocess.run(largs, capture_output=True, text=True)
+    if r.returncode == 2:
+        raise ENOENT
+    if r.returncode == 9:
+        raise EBADF
+    if r.returncode == 14:
+        raise EFAULT
+    if r.returncode == 22:
+        raise EINVAL
+    if r.returncode != 0:
+        raise EUNKNOWN
     return r.stdout
+
+def container_util_verify(container, public_key):
+    return container_util(['--verify', '--pubkey', public_key, container])
 
 def generate_rsa_keypair(key_size):
     private = rsa.generate_private_key(
@@ -99,14 +124,31 @@ class test_verify(unittest.TestCase):
         write_file(self.public_key, wrong_public_pem)
         make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
         assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
-        with self.assertRaises(CalledProcessError):
+        with self.assertRaises(EBADF):
             container_util_verify(self.container, self.public_key)
     def test_error_modified_data(self):
         with open(self.data, 'r+b') as f:
             f.write(b'\x00')
         make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
         assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
-        with self.assertRaises(CalledProcessError):
+        with self.assertRaises(EBADF):
+            container_util_verify(self.container, self.public_key)
+    def test_error_no_header(self):
+        with self.assertRaises(EBADF):
+            container_util_verify(self.data, self.public_key)
+    def test_error_no_header(self):
+        with self.assertRaises(EBADF):
+            container_util_verify(self.data, self.public_key)
+    def test_error_file_smaller_than_header(self):
+        generate_file(self.data, 63)
+        with self.assertRaises(EBADF):
+            container_util_verify(self.data, self.public_key)
+    def test_error_invalid_header_magic(self):
+        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
+        with open(self.header, 'r+b') as f:
+            f.write(b'\x00')
+        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
+        with self.assertRaises(EBADF):
             container_util_verify(self.container, self.public_key)
 
 if __name__ == '__main__':
