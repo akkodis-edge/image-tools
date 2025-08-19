@@ -62,8 +62,10 @@ print_usage() {
 	echo " --create            Create signature"
 	echo " --open              Create a mapping with provided name"
 	echo " --keyfile           Path to signing key"
+	echo " --key-pkcs11        pkcs11 url for signing key"
 	echo " --pubkey            Path to validation key"
 	echo " --pubkey-dir        Path to directory with valid keys"
+	echo " --pubkey-pkcs11     pkcs11 url for key"
 	echo " --pubkey-any        Use pubkey from header"
 	echo ""
 	echo "Return value:"
@@ -111,6 +113,12 @@ while [ "$#" -gt 0 ]; do
 		shift # past argument
 		shift # past value
 		;;
+	--key-pkcs11)
+		[ "$#" -gt 1 ] || die $EINVAL "Invalid argument --key-pkcs11"
+		arg_key_pkcs11="$2"
+		shift # past argument
+		shift # past value
+		;;
 	--pubkey)
 		[ "$#" -gt 1 ] || die $EINVAL "Invalid argument --pubkey"
 		arg_pubkey="$2"
@@ -120,6 +128,12 @@ while [ "$#" -gt 0 ]; do
 	--pubkey-dir)
 		[ "$#" -gt 1 ] || die $EINVAL "Invalid argument --pubkey-dir"
 		arg_pubkey_dir="$2"
+		shift # past argument
+		shift # past value
+		;;
+	--pubkey-pkcs11)
+		[ "$#" -gt 1 ] || die $EINVAL "Invalid argument --pubkey-pkcs11"
+		arg_pubkey_pkcs11="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -145,12 +159,13 @@ done
 [ "x$arg_file" != "x" ] ||  die $EINVAL "Missing mandatory argument FILE"
 [ "x$arg_cmd" != "x" ] ||  die $EINVAL "No operation specified, see --verify"
 if [ "$arg_cmd" = "create" ]; then
-	[ "x$arg_keyfile" != "x" ] || die $EINVAL "--create requires --keyfile"
+	[ "x$arg_keyfile" = "x" -a "x$arg_key_pkcs11" = "x" ] && die $EINVAL "--create requires --keyfile or --key-pkcs11"
 	# Do not care who signed input file (if already signed)
 	arg_pubkey_any="yes"
 fi
 
-[ "$arg_pubkey_any" != "yes" -a "x$arg_pubkey" = "x" -a "x$arg_pubkey_dir" = "x" ] && die $EINVAL "No pubkey method provided, see --pubkey*"
+[ "$arg_pubkey_any" != "yes" -a "x$arg_pubkey" = "x" -a "x$arg_pubkey_dir" = "x" -a "x$arg_pubkey_pkcs11" = "x" ] \
+	&& die $EINVAL "No pubkey method provided, see --pubkey*"
 
 # Create workspace
 TMPDIR="$(mktemp -d)" || die $EFAULT "Failed creating temp dir"
@@ -220,6 +235,9 @@ if [ "$total_size" -gt 64 ]; then
 			else
 				if [ "$arg_pubkey_any" = "yes" ]; then
 					validation_pubkey="${TMPDIR}/pubkey"
+				elif [ "x$arg_pubkey_pkcs11" != "x" ]; then
+					validation_pubkey="$arg_pubkey_pkcs11"
+					openssl_extra="-engine pkcs11 -keyform engine"
 				elif [ "x$arg_pubkey" != "x" ]; then
 					if compare_pubkey_sha256 "$arg_pubkey" "$header_pubkey_sha256"; then
 						validation_pubkey="$arg_pubkey"
@@ -241,7 +259,7 @@ if [ "$total_size" -gt 64 ]; then
 			if [ "x$validation_pubkey" != "x" ]; then
 				echo "public key used for validation: $validation_pubkey"
 				# Validate dm-verity header:roothash signature header:digest with header:pubkey
-				openssl_result="$(openssl dgst -sha256 -verify "$validation_pubkey" -signature "${TMPDIR}/digest" "${TMPDIR}/roothash")"
+				openssl_result="$(openssl dgst $openssl_extra -sha256 -verify "$validation_pubkey" -signature "${TMPDIR}/digest" "${TMPDIR}/roothash")"
 				if [ "$openssl_result" = "Verified OK" ]; then
 					[ "$arg_debug" = "yes" ] && echo "roothash signature valid"
 					file_state="VALID"
@@ -290,12 +308,19 @@ elif [ "$arg_cmd" = "create" ]; then
 	PATH="${PATH}:/usr/sbin" veritysetup --data-block-size=4096 --hash-block-size=4096 format \
 		--root-hash-file "${TMPDIR}/roothash" "$arg_file" "${TMPDIR}/tree" || die $EFAULT "Failed dm-verify formatting"
 	# Sign roothash and extract public key
-	if [ "x$arg_keyfile" != "x" ]; then
-		openssl pkey -in "$arg_keyfile" -out "${TMPDIR}/pubkey" -pubout -outform DER || die $ENOENT "Failed extracting --keyfile pubkey"
-		openssl dgst -sha256 -out "${TMPDIR}/digest" -sign "$arg_keyfile" "${TMPDIR}/roothash" || die $EFAULT "Failed signing roothash"
+	if [ "x$arg_key_pkcs11" != "x" ]; then
+		openssl_key="$arg_key_pkcs11"
+		openssl_pkey_extra="-engine pkcs11 -inform engine"
+		openssl_dgst_extra="-engine pkcs11 -keyform engine"
+	elif [ "x$arg_keyfile" != "x" ]; then
+		openssl_key="$arg_keyfile"
+		openssl_pkey_extra=""
+		openssl_dgst_extra=""
 	else
 		die $EINVAL "No signing method provided"
 	fi
+	openssl pkey $openssl_pkey_extra -in "$openssl_key" -out "${TMPDIR}/pubkey" -pubout -outform DER || die $ENOENT "Failed extracting --keyfile pubkey"
+	openssl dgst $openssl_dgst_extra -sha256 -out "${TMPDIR}/digest" -sign "$openssl_key" "${TMPDIR}/roothash" || die $EFAULT "Failed signing roothash"
 
 	# Get section sizes
 	tree_size="$(stat -c %s ${TMPDIR}/tree)" || die $EFAULT "Failed getting hashtree size"
