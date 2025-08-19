@@ -39,6 +39,9 @@ def container_util(args):
 def container_util_verify(container, public_key):
     return container_util(['--verify', '--pubkey', public_key, container])
 
+def container_util_create(file, private_key):
+    return container_util(['--create', '--keyfile', private_key, file])
+
 def generate_rsa_keypair(key_size):
     private = rsa.generate_private_key(
         public_exponent=65537,
@@ -150,6 +153,25 @@ class test_verify(unittest.TestCase):
         assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
         with self.assertRaises(EBADF):
             container_util_verify(self.container, self.public_key)
+
+class test_create(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.private_pem, cls.public_pem = generate_rsa_keypair(1024)
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory(delete=True)
+        self.dir = self.tmpdir.name
+        self.data = os.path.join(self.dir, 'data')
+        generate_file(self.data, 16384)
+        self.private_key = os.path.join(self.dir, 'private_key')
+        self.public_key = os.path.join(self.dir, 'public_key')
+        write_file(self.private_key, self.private_pem)
+        write_file(self.public_key, self.public_pem)
+    def tearDown(self):
+        self.tmpdir.cleanup()
+    def test_ok(self):
+        container_util_create(self.data, self.private_key)
+        self.assertIn('File verified OK', container_util_verify(self.data, self.public_key))
 
 if __name__ == '__main__':
     unittest.main()
