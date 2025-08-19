@@ -235,14 +235,7 @@ if [ "$total_size" -gt 64 ]; then
 				openssl_result="$(openssl dgst -sha256 -verify "$validation_pubkey" -signature "${TMPDIR}/digest" "${TMPDIR}/roothash")"
 				if [ "$openssl_result" = "Verified OK" ]; then
 					[ "$arg_debug" = "yes" ] && echo "roothash signature valid"
-					# Validate file with dm-verity header:tree and header:roothash
-					if PATH="${PATH}:/usr/sbin" veritysetup verify "$arg_file" "$arg_file" "--hash-offset=$tree_offset" \
-						"--root-hash-file=${TMPDIR}/roothash"; then
-						[ "$arg_debug" = "yes" ] && echo "dm-verity data valid"
-						file_state="VALID"
-					else
-						echo "Invalid container, failed dm-verity validation"
-					fi
+					file_state="VALID"
 				else
 					echo "Invalid container, failed veriying roothash digest"
 				fi
@@ -257,11 +250,11 @@ fi
 
 # VERIFY
 if [ "$arg_cmd" = "verify" ]; then
-	if [ "$file_state" = "VALID" ]; then
-		echo "File verified OK"
-	else
-		die $EBADF "File verification failed"
-	fi
+	# Validate file with dm-verity header:tree and header:roothash
+	[ "$file_state" != "VALID" ] && die $EBADF "File verification failed"
+	PATH="${PATH}:/usr/sbin" veritysetup verify "$arg_file" "$arg_file" "--hash-offset=$tree_offset" \
+		"--root-hash-file=${TMPDIR}/roothash" || die $EBADF "File verification failed"
+	echo "File verified OK"
 # CREATE
 elif [ "$arg_cmd" = "create" ]; then
 	if [ "$file_state" = "VALID" ]; then
