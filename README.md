@@ -1,6 +1,19 @@
 # image-tools
 Collection of tools for working with images of various types.
 
+# Build
+
+```
+# Build
+make
+
+# Run tests
+make test
+
+# Run tests requiring super user privilegies
+make test-su
+```
+
 ## image-install
 Partition disk and install images based on configuration.
 
@@ -209,35 +222,4 @@ Example usage:
 ```
 sample/simple-container.sh --build build --path ./ --image service-image-rv8007.rootfs.tar.bz2 --name service-v0.0.1
 
-```
-
-### Run tests
-
-```
-# prepare build
-mkdir -p build/keys
-# make test key
-openssl genrsa -out build/private.pem 4096
-mkdir build/keys
-openssl rsa -in build/private.pem -pubout -out build/keys/public.pem
-# Make sample archive
-echo content1 > build/file1
-echo content2 > build/file2
-tar -jcf build/sample.tar.bz2 -C build file1 file2
-# build container
-sudo ./make-image-container.sh -b build/ -c test/small.yaml \
-	--images "image=build/sample.tar.bz2" \
-	--key build/private.pem --path ./image-install.py \
-	sample.container
-# prepare target device
-truncate -s 21000192 build/blockdevice
-# Create loopdevice
-sudo losetup --show -P -f build/blockdevice 
-# /dev/loop0
-# Install and validate image
-sudo ./install-image-container.sh --device /dev/loop0 --key-dir build/keys \
-	--path ./image-install.py --verify-device build/sample.container
-# Install image
-sudo ./install-image-container.sh --device /dev/loop0 --key-dir build/keys \
-	--path ./image-install.py build/sample.container
 ```
