@@ -5,8 +5,8 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecCondition=/bin/sh -c "/usr/sbin/swap-root state | grep -q SWAPPING"
-ExecStart=/usr/sbin/swap-root commit
+ExecCondition=/bin/sh -c "@BINDIR@/swap-root state | grep -q SWAPPING"
+ExecStart=@BINDIR@/swap-root commit
 RemainAfterExit=yes
 
 [Install]
