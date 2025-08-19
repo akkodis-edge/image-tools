@@ -5,6 +5,7 @@ import tempfile
 import os
 import subprocess
 import struct
+import shutil
 from subprocess import CalledProcessError
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
@@ -36,8 +37,15 @@ def container_util(args):
         raise EUNKNOWN
     return r.stdout
 
-def container_util_verify(container, public_key):
-    return container_util(['--verify', '--pubkey', public_key, container])
+def container_util_verify(container, public_key=None, public_dir=None):
+    args = ['--verify', container]
+    if public_key != None:
+        args.extend(['--pubkey', public_key])
+    elif public_dir != None:
+        args.extend(['--pubkey-dir', public_dir])
+    else:
+        args.append('--pubkey-any')
+    return container_util(args)
 
 def container_util_create(file, private_key):
     return container_util(['--create', '--keyfile', private_key, file])
@@ -121,38 +129,74 @@ class test_verify(unittest.TestCase):
     def test_ok(self):
         make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
         assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
-        self.assertIn('File verified OK', container_util_verify(self.container, self.public_key))
+        self.assertIn('File verified OK', container_util_verify(self.container, public_key=self.public_key))
+    def test_ok_pubkey_any(self):
+        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
+        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
+        self.assertIn('File verified OK', container_util_verify(self.container))
+    def test_ok_pubkey_dir(self):
+        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
+        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
+        public_dir = os.path.join(self.dir, 'public_dir')
+        os.mkdir(public_dir)
+        shutil.copy(self.public_key, public_dir)
+        self.assertIn('File verified OK', container_util_verify(self.container, public_dir=public_dir))
+    def test_ok_pubkey_dir_multiple_keys(self):
+        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
+        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
+        public_dir = os.path.join(self.dir, 'public_dir')
+        os.mkdir(public_dir)
+        shutil.copy(self.public_key, public_dir)
+        wrong_private_pem, wrong_public_pem = generate_rsa_keypair(1024)
+        write_file(os.path.join(public_dir, 'public_key.wrong'), wrong_public_pem)
+        self.assertIn('File verified OK', container_util_verify(self.container, public_dir=public_dir))
+    def test_error_empty_pubkey_dir(self):
+        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
+        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
+        public_dir = os.path.join(self.dir, 'public_dir')
+        os.mkdir(public_dir)
+        with self.assertRaises(EBADF):
+            container_util_verify(self.container, public_dir=public_dir)
+    def test_error_empty_pubkey_dir(self):
+        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
+        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
+        public_dir = os.path.join(self.dir, 'public_dir')
+        os.mkdir(public_dir)
+        wrong_private_pem, wrong_public_pem = generate_rsa_keypair(1024)
+        write_file(os.path.join(public_dir, 'public_key.wrong'), wrong_public_pem)
+        with self.assertRaises(EBADF):
+            container_util_verify(self.container, public_dir=public_dir)
     def test_error_wrong_public_key(self):
         wrong_private_pem, wrong_public_pem = generate_rsa_keypair(1024)
         write_file(self.public_key, wrong_public_pem)
         make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
         assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
         with self.assertRaises(EBADF):
-            container_util_verify(self.container, self.public_key)
+            container_util_verify(self.container, public_key=self.public_key)
     def test_error_modified_data(self):
         with open(self.data, 'r+b') as f:
             f.write(b'\x00')
         make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
         assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
         with self.assertRaises(EBADF):
-            container_util_verify(self.container, self.public_key)
+            container_util_verify(self.container, public_key=self.public_key)
     def test_error_no_header(self):
         with self.assertRaises(EBADF):
-            container_util_verify(self.data, self.public_key)
+            container_util_verify(self.data, public_key=self.public_key)
     def test_error_no_header(self):
         with self.assertRaises(EBADF):
-            container_util_verify(self.data, self.public_key)
+            container_util_verify(self.data, public_key=self.public_key)
     def test_error_file_smaller_than_header(self):
         generate_file(self.data, 63)
         with self.assertRaises(EBADF):
-            container_util_verify(self.data, self.public_key)
+            container_util_verify(self.data, public_key=self.public_key)
     def test_error_invalid_header_magic(self):
         make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
         with open(self.header, 'r+b') as f:
             f.write(b'\x00')
         assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
         with self.assertRaises(EBADF):
-            container_util_verify(self.container, self.public_key)
+            container_util_verify(self.container, public_key=self.public_key)
 
 class test_create(unittest.TestCase):
     @classmethod
@@ -171,7 +215,7 @@ class test_create(unittest.TestCase):
         self.tmpdir.cleanup()
     def test_ok(self):
         container_util_create(self.data, self.private_key)
-        self.assertIn('File verified OK', container_util_verify(self.data, self.public_key))
+        self.assertIn('File verified OK', container_util_verify(self.data, public_key=self.public_key))
 
 if __name__ == '__main__':
     unittest.main()
