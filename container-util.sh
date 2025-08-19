@@ -60,6 +60,7 @@ print_usage() {
 	echo "  -d,--debug         Debug output"
 	echo " --verify            Verify signature"
 	echo " --create            Create signature"
+	echo " --open              Create a mapping with provided name"
 	echo " --keyfile           Path to signing key"
 	echo " --pubkey            Path to validation key"
 	echo " --pubkey-dir        Path to directory with valid keys"
@@ -81,6 +82,7 @@ arg_cmd=""
 arg_pubkey=""
 arg_pubkey_dir=""
 arg_pubkey_any="no"
+arg_open=""
 
 while [ "$#" -gt 0 ]; do
 	case $1 in
@@ -95,6 +97,13 @@ while [ "$#" -gt 0 ]; do
 	--create)
 		arg_cmd="create"
 		shift # past argument
+		;;
+	--open)
+		[ "$#" -gt 1 ] || die $EINVAL "Invalid argument --open"
+		arg_cmd="open"
+		arg_open="$2"
+		shift # past argument
+		shift # past value
 		;;
 	--keyfile)
 		[ "$#" -gt 1 ] || die $EINVAL "Invalid argument --keyfile"
@@ -255,6 +264,11 @@ if [ "$arg_cmd" = "verify" ]; then
 	PATH="${PATH}:/usr/sbin" veritysetup verify "$arg_file" "$arg_file" "--hash-offset=$tree_offset" \
 		"--root-hash-file=${TMPDIR}/roothash" || die $EBADF "File verification failed"
 	echo "File verified OK"
+# OPEN
+elif [ "$arg_cmd" = "open" ]; then
+	[ "$file_state" != "VALID" ] && die $EBADF "File verification failed"
+	PATH="${PATH}:/usr/sbin" veritysetup open "$arg_file" "$arg_open" "$arg_file" "--hash-offset=$tree_offset" \
+		"--root-hash-file=${TMPDIR}/roothash" || die $EBADF "Failed opening dm-verity"
 # CREATE
 elif [ "$arg_cmd" = "create" ]; then
 	if [ "$file_state" = "VALID" ]; then
