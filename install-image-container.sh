@@ -109,69 +109,16 @@ done
 
 TMP="$(mktemp -d)" || die "Failed creating tmp directory"
 
-container_size="$(stat -L -c %s ${container})" || die "Failed getting container size"
-tail --bytes 64 "$container" > "${TMP}/offsets" || die "Failed extracting offset blob"
-magic="$(od -N 4 -A none --endian=little --format=u4 ${TMP}/offsets)" || die "Failed extracting tree offset"
-magic="$(printf '0x%08x' ${magic})" || die "Failed converting magic"
-[ "$magic" = 0x494d4721 ] || die "Invalid container magic [$magic] not the expected 0x494d4721"
-tree_offset="$(od -N 8 -j 32 -A none --endian=little --format=u8 ${TMP}/offsets)" || die "Failed extracting tree offset"
-tree_offset="$(echo "$tree_offset" | tr -d ' ')" || die "Failed truncating"
-root_offset="$(od -N 8 -j 40 -A none --endian=little --format=u8 ${TMP}/offsets)" || die "Failed extracting root offset"
-root_offset="$(echo "$root_offset" | tr -d ' ')" || die "Failed truncating"
-digest_offset="$(od -N 8 -j 48 -A none --endian=little --format=u8 ${TMP}/offsets)" || die "Failed extracting digest offset"
-digest_offset="$(echo "$digest_offset" | tr -d ' ')" || die "Failed truncating"
-key_offset="$(od -N 8 -j 56 -A none --endian=little --format=u8 ${TMP}/offsets)" || die "Failed extracting key offset"
-key_offset="$(echo "$key_offset" | tr -d ' ')" || die "Failed truncating"
-
-[ $tree_offset -lt $root_offset ] || die "Invalid container, tree offset not less than root offset"
-[ $root_offset -lt $digest_offset ] || die "Invalid container, root offset not less than digest offset"
-[ $digest_offset -lt $key_offset ] || die "Invalid container, digest offset not less than key offset"
-[ $key_offset -lt $container_size ] || die "Invalid container, key offset less than container size"
-
-tree_size=$(( $root_offset - $tree_offset ))
-root_size=$(( $digest_offset - $root_offset ))
-digest_size=$(( $key_offset - $digest_offset ))
-key_size=$(( $container_size - $key_offset - 64 ))
-
-echo "Container:"
-printf " 0x%08x squashfs - %d b\n" 0 $tree_offset
-printf " 0x%08x tree     - %d b\n" $tree_offset $tree_size
-printf " 0x%08x root     - %d b\n" $root_offset $root_size
-printf " 0x%08x digest   - %d b\n" $digest_offset $digest_size
-printf " 0x%08x key      - %d b\n" $key_offset $key_size
-
-# Extract data for validating container
-dd "if=${container}" "of=${TMP}/container.roothash" "bs=${root_size}" count=1 iflag=skip_bytes "skip=${root_offset}" status=none || die "Failed extracting roothash"
-dd "if=${container}" "of=${TMP}/container.digest" "bs=${digest_size}" count=1 iflag=skip_bytes "skip=${digest_offset}" status=none || die "Failed extracting digest"
-dd "if=${container}" "of=${TMP}/container.key" "bs=${key_size}" count=1 iflag=skip_bytes "skip=${key_offset}" status=none || die "Failed extracting key"
-# Validate key
-openssl pkey -in "${TMP}/container.key" -pubin -pubcheck -noout || die "Failed validating public key"
-key_sha256="$(cat ${TMP}/container.key | sha256sum)" || die "Failed calculating public key sha256"
-echo " key sha256: ${key_sha256}"
-
-# Find matching public key if requested
-if [ "$validate_pubkey" != "no" ]; then
-	for pub in "$keydir"/*; do
-		if openssl pkey -in "$pub" -pubcheck -pubin -noout; then
-			tmpsha256="$(openssl pkey -in ${pub} -pubin -outform DER | sha256sum)"
-			echo "Matching with keydir/$(basename ${pub}) sha256: ${tmpsha256}"
-			if [ "$key_sha256" = "$tmpsha256" ]; then
-				echo "Match!"
-				foundkey="$pub"
-				break
-			fi
-		fi
-	done
-	[ "x$foundkey" != "x" ] || die "No matching public key available"
-else
-	foundkey="${TMP}/container.key"
-fi	
-
 # Validate and mount container
-openssl dgst -sha256 -verify "$foundkey" -signature "${TMP}/container.digest" \
-	"${TMP}/container.roothash" || die "Failed validating roothash"
-veritysetup open "$container" imageinstaller "$container" "--hash-offset=${tree_offset}" \
-	"--root-hash-file=${TMP}/container.roothash" || die "Failed enabling dm-verity"
+container_util_args="--open imageinstaller "$container""
+if [ "$validate_pubkey" != "yes" ]; then
+	container_util_args="$container_util_args --pubkey-any"
+elif [ "x$keydir" != "x" ]; then
+	container_util_args="$container_util_args --pubkey-dir "$keydir""
+else
+	die "No known key validation provided"
+fi
+PATH="$path:$PATH" container-util $container_util_args || die "Failed opening container"
 VERITY="imageinstaller"
 mkdir "${TMP}/mnt" || die "Failed creating mnt dir"
 mount -t squashfs -o ro /dev/mapper/imageinstaller "${TMP}/mnt" || die "Failed mounting squashfs" 
