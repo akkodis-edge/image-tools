@@ -16,7 +16,7 @@ print_usage() {
     echo "  -f,--filesystem   Filesystem to use. Default ${FILESYSTEM}"
     echo "  -e,--extra        Extra free space in MiB. Default ${EXTRA}"
     echo "  -l,--label        Gptlabel"
-    echo "  -p,--path         Path to image-install application. By default resolve by \$PATH"
+    echo "  -p,--path         Additional \$PATH for image-install application"
 }
 
 while [ $# -gt 0 ]; do
@@ -42,7 +42,7 @@ while [ $# -gt 0 ]; do
 		shift # past value
 		;;
 	-p|--path)
-		IMAGE_INSTALL="$2"
+		path="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -98,7 +98,7 @@ images:
      target: "label:${LABEL}"
 EOM
 printf '%s\n' "$config"
-if printf '%s\n' "$config" | "$IMAGE_INSTALL" --wipefs --device "$DEVICE" --config - image="${ARCHIVE}"; then
+if printf '%s\n' "$config" | PATH="$path:$PATH" image-install --wipefs --device "$DEVICE" --config - image="${ARCHIVE}"; then
 	echo "Success!"
 	exit 0
 fi

@@ -30,14 +30,13 @@ print_usage() {
     echo "  -c,--conf         Path to yaml config describing disk"
     echo "  -i,--images       Space separated list of imagename=imagepath"
     echo "                    where imagename is defined by --conf file."
-    echo "  -p,--path         Path to image-install application. By default resolve by \$PATH"
+    echo "  -p,--path         Additional \$PATH for image-install and container-util application"
     echo "  --key             Path to private key for signing image"
     echo "  --disk-name       Name to use for disk image inside container"
     echo "  --preinstall      Path to preinstall script which will be called before image installation"
     echo "  --postinstall     Path to postinstall script which will be called after image installation"
 }
 
-image_install="image-install"
 while [ "$#" -gt 0 ]; do
 	case $1 in
 	-b|--build)
@@ -54,7 +53,7 @@ while [ "$#" -gt 0 ]; do
 		;;
 	-p|--path)
 		[ "$#" -gt 1 ] || die "Invalid argument -p/--path"
-		image_install="$2"
+		path="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -145,7 +144,7 @@ if [ "x$conf" != "x" ]; then
 	# Finalize disk image
 	cat "$conf"
 	echo ""
-	"$image_install" --config "$conf" --device "$LODEV" $images || die "Failed finalizing image"
+	PATH="$path:$PATH" image-install --config "$conf" --device "$LODEV" $images || die "Failed finalizing image"
 	# Remove loopback device
 	cleanup
 	

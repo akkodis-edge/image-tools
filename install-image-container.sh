@@ -35,7 +35,7 @@ print_usage() {
     echo "                        Value of - means config in stdin"
     echo "  -i,--images           Space separated list of imagename=imagepath. Relative path to image within container. To be used with --conf"
     echo "  --any-pubkey          Flag to only use public key in container for validation -- do not match public key to known key"
-    echo "  -p,--path             Path to image-install application. By default resolve by \$PATH"
+    echo "  -p,--path             Additional \$PATH for image-install and container-util application"
     echo "  --key-dir             Path to directory of public keys for validating container signature"
     echo "  --verify-device       Verify disk image to device by:"
     echo "                         - zero full device before image installation"
@@ -47,7 +47,6 @@ print_usage() {
     echo "  --reset-nvram-update  Reset nvram A/B update to defaults"
 }
 
-image_install="image-install"
 validate_pubkey="yes"
 while [ "$#" -gt 0 ]; do
 	case $1 in
@@ -59,7 +58,7 @@ while [ "$#" -gt 0 ]; do
 		;;
 	-p|--path)
 		[ "$#" -gt 1 ] || die "Invalid argument -p/--path"
-		image_install="$2"
+		path="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -195,7 +194,7 @@ if [ "x$conf" != "x" ]; then
 	fi
 	# cd to container for relative --image paths
 	cd "${TMP}/mnt"
-	printf '%s\n' "$config" | "$image_install" --force-unmount --device "$device" --config - $images || die "Failed installing image"
+	printf '%s\n' "$config" | PATH="$path:$PATH" image-install --force-unmount --device "$device" --config - $images || die "Failed installing image"
 	# Return to previous dir
 	cd -
 	
@@ -208,7 +207,7 @@ images:
      target: device
      reload_partitions: true
 EOM
-	printf '%s\n' "$config" | "$image_install" $zerofill --force-unmount --wipefs --device "$device" --config - "image=${TMP}/mnt/disk.img" || die "Failed installing image"
+	printf '%s\n' "$config" | PATH="$path:$PATH" image-install $zerofill --force-unmount --wipefs --device "$device" --config - "image=${TMP}/mnt/disk.img" || die "Failed installing image"
 fi
 
 
