@@ -76,3 +76,11 @@ install: $(ALL_TARGETS_BIN_INSTALL) $(ALL_TARGETS_SYSTEMD_INSTALL)
 %.systemd.install: $(BUILD)/%
 	install -d $(DESTDIR)$(systemd_system_unitdir)
 	install -m 0644 $< $(DESTDIR)$(systemd_system_unitdir)
+
+.PHONY: test
+test: $(BUILD)/container-util
+	./test-container-util.py
+
+.PHONY: test-su
+test-su: $(BUILD)/container-util $(BUILD)/install-image-container $(BUILD)/image-install $(BUILD)/make-image-container
+	./test-container-su.sh
