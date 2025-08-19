@@ -22,7 +22,7 @@ class EUNKNOWN(Exception):
     pass
 
 def container_util(args):
-    largs = ['./container-util.sh']
+    largs = ['build/container-util']
     largs.extend(args)
     r = subprocess.run(largs, capture_output=True, text=True)
     if r.returncode == 2:
