@@ -32,6 +32,7 @@ print_usage() {
     echo "                    where imagename is defined by --conf file."
     echo "  -p,--path         Additional \$PATH for image-install and container-util application"
     echo "  --key             Path to private key for signing image"
+    echo "  --key-pkcs11      PKCS#11 URL for private key"
     echo "  --disk-name       Name to use for disk image inside container"
     echo "  --preinstall      Path to preinstall script which will be called before image installation"
     echo "  --postinstall     Path to postinstall script which will be called after image installation"
@@ -75,6 +76,12 @@ while [ "$#" -gt 0 ]; do
 		shift # past argument
 		shift # past value
 		;;
+	--key-pkcs11)
+		[ "$#" -gt 1 ] || die "Invalid argument --key-pkcs11"
+		key_pkcs11="$2"
+		shift # past argument
+		shift # past value
+		;;
 	--disk-name)
 		[ "$#" -gt 1 ] || die "Invalid argument --disk-name"
 		disk_name="$2"
@@ -109,7 +116,7 @@ done
 [ "x$conf" != "x" -a "x$partitions" != "x" ] && die "Invalid argument -c/--conf and --partitions are mutually exclusive"
 [ "x$conf" = "x" -a "x$partitions" = "x" ] && die "Missing argument -c/--conf or --partitions" 
 [ "x$container_name" != "x" ] || die "Missing argument CONTAINER"
-[ "x$keyfile" != "x" ] || die "No signing method provided"
+[ "x$keyfile" = "x" -a "x$key_pkcs11" = "x" ] && die "No signing method provided"
 
 # Verify no reserved names are used
 for x in "$container_name" "$preinstall" "$postinstall" $partitions; do
@@ -199,6 +206,15 @@ fi
 # Create squashfs
 mksquashfs $artifacts "${build}/${container_name}" -noappend -all-root || die "Failed creating squashfs"
 # Package as container
-PATH="$path:$PATH" container-util --create --keyfile "$keyfile" "${build}/${container_name}" || die "Failed creating container"
+if [ "x$key_pkcs11" != "x" ]; then
+	sign_method="--key-pkcs11"
+	sign_arg="$key_pkcs11"
+elif [ "x$keyfile" != "x" ]; then
+	sign_method="--keyfile"
+	sign_arg="$keyfile"
+else
+	die "No signing method provided"
+fi
+PATH="$path:$PATH" container-util --create $sign_method "$sign_arg" "${build}/${container_name}" || die "Failed creating container"
 
 exit 0
