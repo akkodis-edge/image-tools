@@ -27,6 +27,7 @@ print_usage() {
     echo "  -b,--build        Path to build directory, will be created if needed"
     echo "Optional:"
     echo "  --partitions      Space separated list to paths of partitions"
+    echo "  --disk            Path to disk image"
     echo "  -c,--conf         Path to yaml config describing disk"
     echo "  -i,--images       Space separated list of imagename=imagepath"
     echo "                    where imagename is defined by --conf file."
@@ -61,6 +62,12 @@ while [ "$#" -gt 0 ]; do
 	--partitions)
 		[ "$#" -gt 1 ] || die "Invalid argument --partitions"
 		partitions="$2"
+		shift # past argument
+		shift # past value
+		;;
+	--disk)
+		[ "$#" -gt 1 ] || die "Invalid argument --disk"
+		disk="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -111,10 +118,16 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ "$(id -u)" -eq 0 ] || die "Must be run as root"
 [ "x$build" != "x" ] || die "Missing argument -b/--build"
-[ "x$conf" != "x" -a "x$partitions" != "x" ] && die "Invalid argument -c/--conf and --partitions are mutually exclusive"
-[ "x$conf" = "x" -a "x$partitions" = "x" ] && die "Missing argument -c/--conf or --partitions" 
+[ "x$conf" = "x" -a "x$partitions" = "x" -a "x$disk" = "x" ] && die "Missing argument -c/--conf, --partitions or --disk"
+count=0
+if [ "x$conf" != "x" ]; then
+	[ "$(id -u)" -eq 0 ] || die "--conf must be run as root"
+	count=$(( $count + 1 ))
+fi
+[ "x$partitions" != "x" ] && count=$(( $count + 1 ))
+[ "x$disk" != "x" ] && count=$(( $count + 1 ))
+[ $count -eq 1 ] || ie "Invalid argument -c/--conf, --partitions and --disk are mutually exclusive"
 [ "x$container_name" != "x" ] || die "Missing argument CONTAINER"
 [ "x$keyfile" = "x" -a "x$key_pkcs11" = "x" ] && die "No signing method provided"
 
@@ -182,6 +195,22 @@ if [ "x$partitions" != "x" ]; then
 		bmaptool create -o "${build}/${part_basename}.bmap" "$part" || die "Failed creating bmap"
 		artifacts="${artifacts} ${part} ${build}/${part_basename}.bmap"
 	done
+fi
+
+if [ "x$disk" != "x" ]; then
+	disk_basename="$(basename "$disk")" || die "Failed getting disk basename"
+	# Create bmap
+	bmaptool create -o "${build}/${disk_basename}.bmap" "$disk" || die "Failed creating bmap"
+	# Calculate sha256
+	disk_sha256="$(cat ${disk} | sha256sum)" || die "Failed calculating sha256"
+	echo "$disk_sha256" > "${build}/${disk_basename}.sha256"|| die "Failed writing sha256"
+	artifacts="${disk} ${build}/${disk_basename}.bmap ${build}/${disk_basename}.sha256"
+	# Create links unless already named disk.img
+	if [ "x$disk_basename" != "disk.img" ]; then
+		ln -sf "$disk_basename" "${build}/disk.img" || die "Failed creating link"
+		ln -sf "$disk_basename.sha256" "${build}/disk.img.sha256" || die "Failed creating link"
+		ln -sf "$disk_basename.bmap" "${build}/disk.img.bmap" || die "Failed creating link"
+	fi
 fi
 
 # Add pre/postinstall if requested
