@@ -233,7 +233,7 @@ if [ "x$postinstall" != "x" ]; then
 fi
 
 # Create squashfs
-mksquashfs $artifacts "${build}/${container_name}" -noappend -all-root || die "Failed creating squashfs"
+mksquashfs $artifacts "${build}/image.container" -noappend -all-root || die "Failed creating squashfs"
 # Package as container
 if [ "x$key_pkcs11" != "x" ]; then
 	sign_method="--key-pkcs11"
@@ -244,6 +244,7 @@ elif [ "x$keyfile" != "x" ]; then
 else
 	die "No signing method provided"
 fi
-PATH="$path:$PATH" container-util --create $sign_method "$sign_arg" "${build}/${container_name}" || die "Failed creating container"
+PATH="$path:$PATH" container-util --create $sign_method "$sign_arg" "${build}/image.container" || die "Failed creating container"
+mv "${build}/image.container" "$container_name" || die "Failed moving output container"
 
 exit 0
