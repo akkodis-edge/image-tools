@@ -206,10 +206,11 @@ if [ "x$disk" != "x" ]; then
 	echo "$disk_sha256" > "${build}/${disk_basename}.sha256"|| die "Failed writing sha256"
 	artifacts="${disk} ${build}/${disk_basename}.bmap ${build}/${disk_basename}.sha256"
 	# Create links unless already named disk.img
-	if [ "x$disk_basename" != "disk.img" ]; then
+	if [ "$disk_basename" != "disk.img" ]; then
 		ln -sf "$disk_basename" "${build}/disk.img" || die "Failed creating link"
 		ln -sf "$disk_basename.sha256" "${build}/disk.img.sha256" || die "Failed creating link"
 		ln -sf "$disk_basename.bmap" "${build}/disk.img.bmap" || die "Failed creating link"
+		artifacts="${artifacts} ${build}/disk.img.bmap ${build}/disk.img.sha256 ${build}/disk.img"
 	fi
 fi
 
