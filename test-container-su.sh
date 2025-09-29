@@ -63,7 +63,7 @@ mkdir "${TMP}/build" || die "Failed creating build dir"
 sudo build/make-image-container -c "${TMP}/disk-conf.yaml" \
     --images "image=${TMP}/sample.tar.bz2" --key "${TMP}/keys/private.pem" \
     --path build --build "${TMP}/build" \
-    sample.container || die "Failed creating container"
+    "${TMP}/sample.container" || die "Failed creating container"
 
 # prepare target device
 truncate -s 21000192 "${TMP}/blockdevice" || die "Failed creating blockdevice"
@@ -71,7 +71,7 @@ LODEV="$(sudo losetup --show -P -f "${TMP}/blockdevice")" || die "Failed creatin
 
 # Install container
 sudo build/install-image-container --device "$LODEV" --key-dir "${TMP}/keys" \
-    --path build "${TMP}/build/sample.container" || die "Failed installing container"
+    --path build "${TMP}/sample.container" || die "Failed installing container"
 
 mkdir "${TMP}/mnt" || die "Failed creating mount dir"
 sudo mount "${LODEV}p1" "${TMP}/mnt" || die "Failed mounting loop device"
