@@ -50,6 +50,9 @@ def container_util_verify(container, public_key=None, public_dir=None):
 def container_util_create(file, private_key):
     return container_util(['--create', '--keyfile', private_key, file])
 
+def container_util_roothash(file, public_key):
+    return container_util(['--roothash', '--pubkey', public_key, file])
+
 def generate_rsa_keypair(key_size):
     private = rsa.generate_private_key(
         public_exponent=65537,
@@ -216,6 +219,35 @@ class test_create(unittest.TestCase):
     def test_ok(self):
         container_util_create(self.data, self.private_key)
         self.assertIn('File verified OK', container_util_verify(self.data, public_key=self.public_key))
+
+class test_roothash(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.private_pem, cls.public_pem = generate_rsa_keypair(1024)
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory(delete=True)
+        self.dir = self.tmpdir.name
+        self.roothash = os.path.join(self.dir, 'roothash')
+        self.tree = os.path.join(self.dir, 'tree')
+        self.data = os.path.join(self.dir, 'data')
+        generate_file(self.data, 16384)
+        self.private_key = os.path.join(self.dir, 'private_key')
+        self.public_key = os.path.join(self.dir, 'public_key')
+        write_file(self.private_key, self.private_pem)
+        write_file(self.public_key, self.public_pem)
+        self.digest = os.path.join(self.dir, 'digest')
+        self.header = os.path.join(self.dir, 'header')
+        self.container = os.path.join(self.dir, 'container')
+        dmverity_format(self.roothash, self.tree, self.data)
+        sign_data(self.private_key, self.roothash, self.digest)
+    def tearDown(self):
+        self.tmpdir.cleanup()
+    def test_ok(self):
+        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key)
+        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
+        with open(self.roothash, 'r') as f:
+            roothash = f.read()
+        self.assertEqual(container_util_roothash(self.container, self.public_key), '{}\n'.format(roothash))
 
 if __name__ == '__main__':
     unittest.main()
