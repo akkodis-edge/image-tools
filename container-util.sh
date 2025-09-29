@@ -81,6 +81,7 @@ print_usage() {
 	echo " --pubkey-dir        Path to directory with valid keys"
 	echo " --pubkey-pkcs11     pkcs11 url for key"
 	echo " --pubkey-any        Use pubkey from header"
+	echo " --roothash          Dump roothash"
 	echo ""
 	echo "Return value:"
 	echo " 0 for success or error code"
@@ -120,6 +121,10 @@ while [ "$#" -gt 0 ]; do
 		arg_open="$2"
 		shift # past argument
 		shift # past value
+		;;
+	--roothash)
+		arg_cmd="roothash"
+		shift # past argument
 		;;
 	--keyfile)
 		[ "$#" -gt 1 ] || die $EINVAL "Invalid argument --keyfile"
@@ -271,7 +276,7 @@ if [ "$total_size" -gt 64 ]; then
 			fi
 
 			if [ "x$validation_pubkey" != "x" ]; then
-				echo "public key used for validation: $validation_pubkey"
+				[ "$arg_debug" = "yes" ] && echo "public key used for validation: $validation_pubkey"
 				# Validate dm-verity header:roothash signature header:digest with header:pubkey
 				openssl_result="$(openssl dgst $openssl_extra -sha256 -verify "$validation_pubkey" -signature "${TMPDIR}/digest" "${TMPDIR}/roothash")"
 				if [ "$openssl_result" = "Verified OK" ]; then
@@ -372,6 +377,10 @@ elif [ "$arg_cmd" = "create" ]; then
 	# Assembly output file
 	cat "${TMPDIR}/tree" "${TMPDIR}/roothash" "${TMPDIR}/digest" "${TMPDIR}/pubkey" "${TMPDIR}/offsets" \
 		>> "$arg_file" || die $EFAULT "Failed appending header"
+elif [ "$arg_cmd" = "roothash" ]; then
+	# Validate file with dm-verity header:tree and header:roothash
+	[ "$file_state" != "VALID" ] && die $EBADF "File verification failed"
+	echo "" | cat "${TMPDIR}/roothash" - || die $EFAULT "Failed outputting roothash"
 else
 	die $EINVAL "Invalid argument"
 fi
