@@ -306,6 +306,7 @@ elif [ "$arg_cmd" = "open" ]; then
 	[ "$file_state" != "VALID" ] && die $EBADF "File verification failed"
 	PATH="${PATH}:/usr/sbin" veritysetup open "$arg_file" "$arg_open" "$arg_file" "--hash-offset=$tree_offset" \
 		"--root-hash-file=${TMPDIR}/roothash" || die $EBADF "Failed opening dm-verity"
+	echo "" | cat "${TMPDIR}/roothash" - || die $EFAULT "Failed outputting roothash"
 # CREATE
 elif [ "$arg_cmd" = "create" ]; then
 	if [ "$file_state" = "VALID" ]; then
