@@ -9,7 +9,7 @@ ifeq ($(abspath $(BUILD)),$(shell pwd))
 $(error "ERROR: Build dir can't be equal to source dir")
 endif
 
-ALL_TARGETS_BIN = container-util image-install install-image-container install-usb-image make-image-container swap-root
+ALL_TARGETS_BIN = container-util image-install install-image-container install-usb-image make-image-container swap-root gpt-insert
 
 USE_SYSTEMD ?= 1
 ifeq ($(USE_SYSTEMD), 1)
@@ -47,6 +47,10 @@ $(BUILD)/make-image-container: make-image-container.sh
 	install -m 0755 $< $@
 
 $(BUILD)/swap-root: swap-root.sh
+	mkdir -p $(BUILD)
+	install -m 0755 $< $@
+
+$(BUILD)/gpt-insert: gpt-insert.py
 	mkdir -p $(BUILD)
 	install -m 0755 $< $@
 
