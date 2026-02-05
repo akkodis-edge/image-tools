@@ -220,6 +220,33 @@ Skeleton utility providing a base for creating more advanced processing of image
 Example usage:
 
 ```
-sample/simple-container.sh --build build --path ./ --image service-image-rv8007.rootfs.tar.bz2 --name service-v0.0.1
+# Build image-tools first
+make
 
+# Disk with empty partition table
+# 4GB (3,72529 Gib) disk. 96% of disk used.
+PATH="build/:$PATH" sample/simple-container.sh --build image/ --name test \
+    --disk-size-gb 4 --disk-size-ratio 0.96
+
+# ROOT A/B scheme with data partition.
+# 4GB (3,72529 Gib) disk. 96% of disk used.
+# 500 MiB ext4 root partitions "rootfs1" and "rootfs2".
+#   - "rootfs1" formatted as ext4.
+#   - image.tar.bz2 extracted to "rootfs1".
+# 500 MiB ext4 "data" partition.
+#   - "data" formatted as ext4.
+PATH="build/:$PATH" sample/simple-container.sh --build image/ --name test \
+    --disk-size-gb 4 --disk-size-ratio 0.96 \
+    --data-label data --data-fstype ext4 --data-size-mib 500 \
+    --rootfs-label rootfs1 --rootfs-secondary rootfs2 --rootfs-fstype ext4 --rootfs-size-mib 500 \
+    --rootfs-image image.tar.bz2
+
+# ESP partition and single root
+# 4GB (3,72529 Gib) disk. 96% of disk used.
+# 500 MiB fat32 esp partition
+# 500 MiB ext4 root partition
+PATH="build/:$PATH" sample/simple-container.sh --build image/ --name test \
+    --disk-size-gb 4 --disk-size-ratio 0.96 \
+    --esp-label boot1 --esp-fstype fat32 --esp-size-mib 500 \
+    --rootfs-label rootfs1 --rootfs-fstype ext4 --rootfs-size-mib 500
 ```
