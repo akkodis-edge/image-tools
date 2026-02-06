@@ -4,6 +4,9 @@ Collection of tools for working with images of various types.
 # Build
 
 ```
+# Dependencies
+apt install squashfs-tools cryptsetup-bin
+
 # Build
 make
 
