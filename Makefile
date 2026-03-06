@@ -5,6 +5,20 @@ exec_prefix ?= $(prefix)
 bindir ?= $(exec_prefix)/bin
 systemd_system_unitdir ?= $(libdir)/systemd/system
 
+CFLAGS += -Wall -Wextra -Werror -std=gnu17 -pedantic -O3 -D_GNU_SOURCE
+
+# Enable sanitizers by default
+USE_SANITIZER ?= 1
+ifeq ($(USE_SANITIZER), 1)
+	CFLAGS += -fsanitize=address -fsanitize=undefined
+	LDFLAGS += -fsanitize=address -fsanitize=undefined
+endif
+
+# Enable clang-tidy checking by default
+#USE_CLANG_TIDY ?= 1
+#CLANG_TIDY ?= clang-tidy --config-file build-tools/clang-tidy.config
+
+
 ifeq ($(abspath $(BUILD)),$(shell pwd))
 $(error "ERROR: Build dir can't be equal to source dir")
 endif
@@ -26,9 +40,9 @@ $(ALL_TARGETS_SYSTEMD): %: $(BUILD)/%
 # Disable implicit shells script rule
 %: %.sh
 
-$(BUILD)/container-util: container-util.sh
+$(BUILD)/container-util: container-util.c
 	mkdir -p $(BUILD)
-	install -m 0755 $< $@
+	$(CC) -o $@ $^ $(LDFLAGS)
 
 $(BUILD)/image-install: image-install.py
 	mkdir -p $(BUILD)
@@ -59,6 +73,13 @@ $(BUILD)/%.service: %.service.in
 	sed \
 		-e 's:@BINDIR@:${bindir}:g' \
 		$< > $@
+
+$(BUILD)/%.o: %.c
+ifeq ($(USE_CLANG_TIDY), 1)
+	$(CLANG_TIDY) $< -- $(CFLAGS)
+endif
+	mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 .PHONY: clean
 clean:
