@@ -5,6 +5,39 @@ exec_prefix ?= $(prefix)
 bindir ?= $(exec_prefix)/bin
 systemd_system_unitdir ?= $(libdir)/systemd/system
 
+# Hide all deprecated symbols up to 3.5.0
+OPENSSL_FLAGS = -DOPENSSL_API_COMPAT=30500 -DOPENSSL_NO_DEPRECATED
+CFLAGS += -Wall -Wextra -Werror -std=gnu17 -pedantic -O3 -D_GNU_SOURCE $(OPENSSL_FLAGS)
+
+# Disable sanitizers by default
+USE_SANITIZER ?= 0
+ifeq ($(USE_SANITIZER), 1)
+	CFLAGS += -fsanitize=address -fsanitize=undefined
+	LDFLAGS += -fsanitize=address -fsanitize=undefined
+endif
+
+# Disable clang-tidy checking by default
+USE_CLANG_TIDY ?= 0
+# Disable cognitive complexity check to prioritize other checks
+CLANG_TIDY_CHECKS_LIST = -readability-function-cognitive-complexity
+# short identifiers, in moderation, help making C more readable
+CLANG_TIDY_CHECKS_LIST += -readability-identifier-length
+# difficult to avoid in c
+CLANG_TIDY_CHECKS_LIST += -bugprone-easily-swappable-parameters
+space := $() $()
+comma := ,
+CLANG_TIDY_CHECKS ?= $(subst $(space),$(comma),$(CLANG_TIDY_CHECKS_LIST))
+CLANG_TIDY ?= clang-tidy --config-file build-tools/clang-tidy.config -checks=$(CLANG_TIDY_CHECKS)
+
+# Add SRC version
+SRC_VERSION := $(shell git describe --dirty --always --tags)
+CFLAGS += -DSRC_VERSION=$(SRC_VERSION)
+
+# Enable clang-tidy checking by default
+#USE_CLANG_TIDY ?= 1
+#CLANG_TIDY ?= clang-tidy --config-file build-tools/clang-tidy.config
+
+
 ifeq ($(abspath $(BUILD)),$(shell pwd))
 $(error "ERROR: Build dir can't be equal to source dir")
 endif
@@ -26,9 +59,9 @@ $(ALL_TARGETS_SYSTEMD): %: $(BUILD)/%
 # Disable implicit shells script rule
 %: %.sh
 
-$(BUILD)/container-util: container-util.sh
+$(BUILD)/container-util: $(BUILD)/container-util.o
 	mkdir -p $(BUILD)
-	install -m 0755 $< $@
+	$(CC) -o $@ $^ $(LDFLAGS) -lcrypto -lcryptsetup
 
 $(BUILD)/image-install: image-install.py
 	mkdir -p $(BUILD)
@@ -59,6 +92,13 @@ $(BUILD)/%.service: %.service.in
 	sed \
 		-e 's:@BINDIR@:${bindir}:g' \
 		$< > $@
+
+$(BUILD)/%.o: %.c
+ifeq ($(USE_CLANG_TIDY), 1)
+	$(CLANG_TIDY) $< -- $(CFLAGS)
+endif
+	mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 .PHONY: clean
 clean:
