@@ -10,6 +10,8 @@
 #include <inttypes.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/x509.h>
@@ -383,10 +385,9 @@ static int compare_public_key_der(const uint8_t* der, long size, const EVP_PKEY*
 
 	/* parse key */
 	int r = parse_public_key(der, size, &to_compare);
-	if (r != 0) {
-		pr_dbg("parse_public_key: [%d] %s\n", -r, strerror(-r));
+	if (r != 0)
 		goto exit;
-	}
+
 	pr_dbg("key type: %s\n", EVP_PKEY_get0_type_name(to_compare));
 
 	/* compare keys */
@@ -426,9 +427,6 @@ static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
 
 	pr_dbg("%s: compare\n", path);
 
-	/* Ensure openssl errors are our errors */
-	ERR_clear_error();
-
 	uint8_t *data = NULL;
 	char *name = NULL;
 	char *header = NULL;
@@ -451,38 +449,30 @@ static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
 	rewind(file);
 
 	do {
-		if (strcmp(name, "PUBLIC KEY") == 0) {
+		r = 0;
+		if (strcmp(name, "PUBLIC KEY") == 0)
 			r = compare_public_key_der(data, len, pkey);
-			OPENSSL_free(name);
-			name = NULL;
-			OPENSSL_free(header);
-			header = NULL;
-			OPENSSL_free(data);
-			data = NULL;
-			switch (r) {
-			case 0:
-				pr_dbg("%s: no match\n", path);
-				break;
-			case 1:
-				pr_dbg("%s: match\n", path);
-				r = 1;
-				goto exit;
-			default:
-				pr_dbg("%s: [%d] %s\n", path, -r, strerror(-r));
-				break;
-			}
+
+		OPENSSL_free(name);
+		name = NULL;
+		OPENSSL_free(header);
+		header = NULL;
+		OPENSSL_free(data);
+		data = NULL;
+		switch (r) {
+		case 0:
+			pr_dbg("%s: no match\n", path);
+			break;
+		case 1:
+			pr_info("%s: pubkey used for validation\n", path);
+			r = 1;
+			goto exit;
+		default:
+			pr_dbg("%s: [%d] %s\n", path, -r, strerror(-r));
+			break;
 		}
 	/* Check for PEM, single or stack */
 	} while (PEM_read(file, &name, &header, &data, &len) == 1);
-
-
-	/* Check for error or end of PEM stack */
-	if (ERR_peek_last_error() != PEM_R_NO_START_LINE) {
-		if (dbg == 1) {
-			pr_dbg("%s: failed pem pubkey parsing\n", path);
-			ERR_print_errors_cb(error_cb, NULL);
-		}
-	}
 
 	r = 0;
 exit:
@@ -493,12 +483,59 @@ exit:
 	return r;
 }
 
-static int match_pubkey(const char* path, const char* dir, const EVP_PKEY* pkey)
+static int read_and_compare_public_dir(const char* pubkey_dir, const EVP_PKEY* pkey)
 {
-	(void) dir;
-	if (path) {
+	int r = 0;
+	DIR *dir = opendir(pubkey_dir);
+	if (dir == NULL) {
+		r = -errno;
+		pr_dbg("%s: failed opendir: [%d] %s\n", pubkey_dir, -r, strerror(-r));
+		return r;
+	}
+
+	struct dirent *entry = NULL;
+	while ((entry = readdir(dir)) != NULL) {
+		char *path = NULL;
+		r = asprintf(&path, "%s/%s", pubkey_dir, entry->d_name);
+		if (r < 0) {
+			r = -errno;
+			pr_err("%s: failed asprintf: [%d]: %s\n", pubkey_dir, -r, strerror(-r));
+			goto exit;
+		}
+		struct stat st;
+		memset(&st, 0, sizeof(st));
+		r = 0;
+		if (stat(path, &st) == 0) {
+			if (S_ISREG(st.st_mode))
+				r = read_and_compare_public_key(path, pkey);
+		}
+		else {
+			pr_dbg("%s: failed stat: [%d]: %s\n", path, errno, strerror(errno));
+		}
+		free(path);
+
+		if (r == 1)
+			goto exit;
+	}
+	r = -errno; /* errno will be 0 on end of stream, else error */
+	if (r != 0)
+		pr_dbg("%s: failed readdir: [%d]: %s\n", pubkey_dir, -r, strerror(-r));
+
+exit:
+	closedir(dir);
+	return r;
+}
+
+static int match_pubkey(const char* pubkey, const char* pubkey_dir, const EVP_PKEY* pkey)
+{
+	if (pubkey) {
 		pr_dbg("match container pubkey to --pubkey\n");
-		if (read_and_compare_public_key(path, pkey) == 1)
+		if (read_and_compare_public_key(pubkey, pkey) == 1)
+			return 0;
+	}
+	if (pubkey_dir) {
+		pr_dbg("match container pubkey to --pubkey-dir\n");
+		if (read_and_compare_public_dir(pubkey_dir, pkey) == 1)
 			return 0;
 	}
 
@@ -703,6 +740,7 @@ static void print_usage(void)
 	printf("  --key-pkcs11     PKCS11 url for signing key\n");
 	printf("  --pubkey         Path to validation key\n");
 	printf("  --pubkey-pkcs11  PKCS11 URL for validation key\n");
+	printf("  --pubkey-dir     Path to directory of validation keys\n");
 	printf("  --pubkey-any     Use pubkey from container\n");
 	printf("  --roothash       Dump roothash\n");
 	printf("\n");
@@ -800,6 +838,13 @@ int main(int argc, char *argv[])
 			}
 			cfg.pubkey_pkcs11 = argv[i];
 		}
+		else if (strcmp("--pubkey-dir", argv[i]) == 0) {
+			if (++i >= argc) {
+				fprintf(stderr, "invalid argument --pubkey-dir\n");
+				return EINVAL;
+			}
+			cfg.pubkey_dir = argv[i];
+		}
 		else if (strcmp("--pubkey-any", argv[i]) == 0) {
 			cfg.opt |= OPT_PUBKEY_ANY;
 		}
@@ -840,8 +885,9 @@ int main(int argc, char *argv[])
 
 	if ((cfg.opt & OPT_PUBKEY_ANY) == 0
 			&& cfg.pubkey_path == NULL
-			&& cfg.pubkey_pkcs11 == NULL) {
-		fprintf(stderr, "Missing pubkey --pubkey, --pubkey-pkcs11 or --pubkey-any\n");
+			&& cfg.pubkey_pkcs11 == NULL
+			&& cfg.pubkey_dir == NULL) {
+		fprintf(stderr, "Missing --pubkey, --pubkey-pkcs11, --pubkey-dir or --pubkey-any\n");
 		return EINVAL;
 	}
 
