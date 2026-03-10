@@ -174,8 +174,9 @@ struct section {
 };
 
 enum container_options {
-	CONTAINER_NONE = 0,
-	CONTAINER_VERIFIED = 1 << 0,
+	CONTAINER_NONE     = 0,
+	CONTAINER_VALID    = 1 << 0, /* container header validated */
+	CONTAINER_VERIFIED = 1 << 1, /* container data and tree validated to roothash */
 };
 
 struct container {
@@ -474,11 +475,11 @@ static int read_container(struct container* container, int fd)
 	r = validate_digest(fd, (uint8_t*) roothash, container->root.size, &container->digest, container->pkey);
 	switch (r) {
 	case 1:
-		container->opt |= CONTAINER_VERIFIED;
+		container->opt |= CONTAINER_VALID;
 		pr_dbg("container - valid\n");
 		break;
 	case 0:
-		container->opt &= ~CONTAINER_VERIFIED;
+		container->opt &= ~CONTAINER_VALID;
 		pr_dbg("container - invalid signature\n");
 		break;
 	default:
@@ -497,6 +498,56 @@ static int read_container(struct container* container, int fd)
 exit:
 	if (roothash != NULL)
 		free(roothash);
+	return r;
+}
+
+static int verify_container(const char* path, struct container* container)
+{
+	/* init */
+	struct crypt_device *cd = NULL;
+	int r = crypt_init_data_device(&cd, path, path);
+	if (r != 0) {
+		pr_err("crypt_init_data_device: [%d] %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	/* load */
+	struct crypt_params_verity params;
+	memset(&params, 0, sizeof(params));
+	params.flags = CRYPT_VERITY_CHECK_HASH;
+	params.hash_area_offset = container->tree.offset;
+	r = crypt_load(cd, CRYPT_VERITY, &params);
+	if (r != 0) {
+		pr_err("crypt_load: [%d] %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	/* confirm roothash size */
+	const int hash_size = crypt_get_volume_key_size(cd);
+	if (hash_size < 0) {
+		pr_err("crypt_get_volume_key_size: unexpected size\n");
+		r = -EFAULT;
+		goto exit;
+	}
+	if (container->roothash_size != (size_t) hash_size) {
+		pr_err("unexpected roothash size\n");
+		r = -EBADF;
+		goto exit;
+	}
+
+	/* verify */
+	r = crypt_activate_by_signed_key(cd, NULL, (char*) container->roothash, container->roothash_size,
+										NULL, 0, CRYPT_ACTIVATE_READONLY);
+	if (r != 0) {
+		pr_err("crypt_activate_by_signed_key: [%d] %s\n", -r, strerror(-r));
+		goto exit;
+	}
+	container->opt |= CONTAINER_VERIFIED;
+
+	r = 0;
+exit:
+	if (cd != NULL)
+		crypt_free(cd);
 	return r;
 }
 
@@ -691,7 +742,16 @@ int main(int argc, char *argv[])
 	}
 
 	if ((cfg.opt & OPT_VERIFY_ONLY) == OPT_VERIFY_ONLY) {
-
+		r = verify_container(cfg.filepath, &container);
+		if (r != 0)
+			goto exit;
+		if ((container.opt & CONTAINER_VERIFIED) == CONTAINER_VERIFIED) {
+			pr_dbg("container - verified\n");
+			goto exit;
+		}
+		pr_dbg("container - corrupt\n");
+		r = -EBADF;
+		goto exit;
 	}
 
 	if ((cfg.opt & OPT_ROOTHASH) == OPT_ROOTHASH) {
