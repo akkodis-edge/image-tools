@@ -13,12 +13,118 @@
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/x509.h>
+#include <libcryptsetup.h>
+
+// FIXME:  Add test if FILE is symbolic link
+// FIXME:  GPL-2.0-or-later
+// FIXME:  cryptsetup license
+
+/*
+ * Following functions are copied from cryptsetup/lib/utils_crypt.c
+ *   hex_to_bin()
+ *   hex2asc()
+ *   crypt_hex_to_bytes()
+ *   crypt_bytes_to_hex()
+ */
+
+/*
+ * Thanks Mikulas Patocka for these two char converting functions.
+ *
+ * This function is used to load cryptographic keys, so it is coded in such a
+ * way that there are no conditions or memory accesses that depend on data.
+ *
+ * Explanation of the logic:
+ * (ch - '9' - 1) is negative if ch <= '9'
+ * ('0' - 1 - ch) is negative if ch >= '0'
+ * we "and" these two values, so the result is negative if ch is in the range
+ * '0' ... '9'
+ * we are only interested in the sign, so we do a shift ">> 8"; note that right
+ * shift of a negative value is implementation-defined, so we cast the
+ * value to (unsigned) before the shift --- we have 0xffffff if ch is in
+ * the range '0' ... '9', 0 otherwise
+ * we "and" this value with (ch - '0' + 1) --- we have a value 1 ... 10 if ch is
+ * in the range '0' ... '9', 0 otherwise
+ * we add this value to -1 --- we have a value 0 ... 9 if ch is in the range '0'
+ * ... '9', -1 otherwise
+ * the next line is similar to the previous one, but we need to decode both
+ * uppercase and lowercase letters, so we use (ch & 0xdf), which converts
+ * lowercase to uppercase
+ */
+static int hex_to_bin(unsigned char ch)
+{
+	unsigned char cu = ch & 0xdf;
+	return -1 +
+		((ch - '0' +  1) & (unsigned)((ch - '9' - 1) & ('0' - 1 - ch)) >> 8) +
+		((cu - 'A' + 11) & (unsigned)((cu - 'F' - 1) & ('A' - 1 - cu)) >> 8);
+}
+
+static char hex2asc(unsigned char c)
+{
+	return c + '0' + ((unsigned)(9 - c) >> 4 & 0x27);
+}
+
+ssize_t crypt_hex_to_bytes(const char *hex, char **result, int safe_alloc)
+{
+	char *bytes;
+	size_t i, len;
+	int bl, bh;
+
+	if (!hex || !result)
+		return -EINVAL;
+
+	len = strlen(hex);
+	if (len % 2)
+		return -EINVAL;
+	len /= 2;
+
+	bytes = safe_alloc ? crypt_safe_alloc(len) : malloc(len);
+	if (!bytes)
+		return -ENOMEM;
+
+	for (i = 0; i < len; i++) {
+		bh = hex_to_bin(hex[i * 2]);
+		bl = hex_to_bin(hex[i * 2 + 1]);
+		if (bh == -1 || bl == -1) {
+			safe_alloc ? crypt_safe_free(bytes) : free(bytes);
+			return -EINVAL;
+		}
+		bytes[i] = (bh << 4) | bl;
+	}
+	*result = bytes;
+	return i;
+}
+
+char *crypt_bytes_to_hex(size_t size, const char *bytes)
+{
+	unsigned i;
+	char *hex;
+
+	if (size && !bytes)
+		return NULL;
+
+	/* Alloc adds trailing \0 */
+	if (size == 0)
+		hex = crypt_safe_alloc(2);
+	else
+		hex = crypt_safe_alloc(size * 2 + 1);
+	if (!hex)
+		return NULL;
+
+	if (size == 0)
+		hex[0] = '-';
+	else for (i = 0; i < size; i++) {
+		hex[i * 2]     = hex2asc((const unsigned char)bytes[i] >> 4);
+		hex[i * 2 + 1] = hex2asc((const unsigned char)bytes[i] & 0xf);
+	}
+
+	return hex;
+}
 
 /* Get sizeof() struct member */
 #define member_size(type, member) (sizeof(((type *)0)->member))
 
 /*
- * Add test if FILE is symbolic link
+ *
  */
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
@@ -79,6 +185,7 @@ struct container {
 	struct section digest;
 	struct section key;
 	uint8_t *roothash;
+	size_t roothash_size;
 	EVP_PKEY *pkey;
 	int opt;
 };
@@ -343,36 +450,53 @@ static int read_container(struct container* container, int fd)
 		return r;
 	}
 
+	char *roothash = NULL;
+
 	/* read public key */
 	r = read_public_key(fd, &container->key, &container->pkey);
 	if (r != 0) {
 		pr_dbg("container - pubkey: [%d]: %s\n", -r, strerror(-r));
-		return r;
+		goto exit;
 	}
 
-	/* read roothash */
-	container->roothash = malloc(container->root.size);
-	if (container->roothash == NULL) {
+	/* read roothash, allocate an extra byte for null-terminator
+	 * for crypt_hex_to_bytes() */
+	roothash = calloc(1, container->root.size + 1);
+	if (roothash == NULL) {
 		r = -ENOMEM;
-		pr_dbg("container - roothash: [%d]: %s\n", -r, strerror(-r));
-		return r;
+		goto exit;
 	}
-	r = pread_bytes(fd, container->root.offset, container->roothash, container->root.size);
+	r = pread_bytes(fd, container->root.offset, (uint8_t*) roothash, container->root.size);
 	if (r != 0)
-		return r;
+		goto exit;
 
 	/* validate roothash */
-	r = validate_digest(fd, container->roothash, container->root.size, &container->digest, container->pkey);
+	r = validate_digest(fd, (uint8_t*) roothash, container->root.size, &container->digest, container->pkey);
 	switch (r) {
 	case 1:
 		container->opt |= CONTAINER_VERIFIED;
 		pr_dbg("container - valid\n");
 		break;
-	default:
+	case 0:
 		container->opt &= ~CONTAINER_VERIFIED;
 		pr_dbg("container - invalid signature\n");
 		break;
+	default:
+		goto exit;
 	}
+
+	/* roothash from hex-encoding to bytes */
+	ssize_t roothash_bytes = crypt_hex_to_bytes(roothash, (char**) &container->roothash, 0);
+	if (roothash_bytes < 0) {
+		r = -EBADF;
+		goto exit;
+	}
+	container->roothash_size = (size_t) roothash_bytes;
+
+	r = 0;
+exit:
+	if (roothash != NULL)
+		free(roothash);
 	return r;
 }
 
@@ -551,8 +675,10 @@ int main(int argc, char *argv[])
 	if (filefd >= 0) {
 		pr_dbg("%s: found file\n", cfg.filepath);
 		r = read_container(&container, filefd);
-		if (r != 0)
+		if (r != 0) {
+			pr_dbg("failed reading [%d]: %s\n", -r, strerror(-r));
 			goto exit;
+		}
 	}
 	else if (errno == ENOENT) {
 		/* Depending on operation a non existing file might be OK. */
@@ -564,7 +690,29 @@ int main(int argc, char *argv[])
 		goto exit;
 	}
 
-	if (cfg.opt & OPT_ROOTHASH)
+	if ((cfg.opt & OPT_VERIFY_ONLY) == OPT_VERIFY_ONLY) {
+
+	}
+
+	if ((cfg.opt & OPT_ROOTHASH) == OPT_ROOTHASH) {
+		if (filefd < 0) {
+			r = -ENOENT;
+			goto exit;
+		}
+		if (container.opt == CONTAINER_NONE) {
+			r = -EBADF;
+			goto exit;
+		}
+		char *hex = crypt_bytes_to_hex(container.roothash_size, (char*) container.roothash);
+		if (hex == NULL) {
+			r = -EFAULT;
+			goto exit;
+		}
+		printf("%s\n", hex);
+		crypt_safe_free(hex);
+		r = 0;
+		goto exit;
+	}
 
 
 exit:
@@ -572,5 +720,5 @@ exit:
 		close(filefd);
 	destroy_container(&container);
 	pr_dbg("exit: %d\n", r);
-	return r;
+	return -r;
 }
