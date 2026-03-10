@@ -425,8 +425,6 @@ static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
 		return r;
 	}
 
-	pr_dbg("%s: compare\n", path);
-
 	uint8_t *data = NULL;
 	char *name = NULL;
 	char *header = NULL;
@@ -448,8 +446,16 @@ static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
 	/* rewind file for PEM parsing if DER fails */
 	rewind(file);
 
+	/* Keep track of DER/PEM and PEM count for improved
+	 * debug messages */
+	int is_PEM = 0;
+	int PEM_count = -1;
+
 	do {
 		r = 0;
+
+		pr_dbg("%s: %s%d checking\n", path, is_PEM ? "PEM" : "DER", is_PEM ? PEM_count : 0);
+
 		if (strcmp(name, "PUBLIC KEY") == 0)
 			r = compare_public_key_der(data, len, pkey);
 
@@ -459,18 +465,15 @@ static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
 		header = NULL;
 		OPENSSL_free(data);
 		data = NULL;
-		switch (r) {
-		case 0:
-			pr_dbg("%s: no match\n", path);
-			break;
-		case 1:
+
+		if (r == 1) {
 			pr_info("%s: pubkey used for validation\n", path);
-			r = 1;
 			goto exit;
-		default:
-			pr_dbg("%s: [%d] %s\n", path, -r, strerror(-r));
-			break;
 		}
+
+		is_PEM = 1;
+		PEM_count++;
+
 	/* Check for PEM, single or stack */
 	} while (PEM_read(file, &name, &header, &data, &len) == 1);
 
