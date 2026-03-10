@@ -371,6 +371,87 @@ exit:
 	return r;
 }
 
+/*
+ * return 1 if equal
+ *        0 if not equal
+ *        negative errno for error
+ */
+static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
+{
+	EVP_PKEY *to_compare = NULL;
+
+	/* open pubkey */
+	int r = 0;
+	const int fd = open(path, O_RDONLY | O_EXCL | O_CLOEXEC);
+	if (fd < 0) {
+		r = -errno;
+		pr_err("%s: open [%d] %s\n", path, -r, strerror(-r));
+		goto exit;
+	}
+
+	/* get size */
+	const off64_t pos = lseek64(fd, 0, SEEK_END);
+	if (pos < 0) {
+		r = -errno;
+		pr_err("%s: seek [%d] %s\n", path, -r, strerror(-r));
+		goto exit;
+	}
+	const struct section section = {
+		.offset = 0,
+		.size = (size_t) pos,
+	};
+
+	/* read key */
+	r = read_public_key(fd, &section, &to_compare);
+	if (r != 0) {
+		pr_dbg("%s: read_public_key [%d] %s\n", path, -r, strerror(-r));
+		goto exit;
+	}
+	pr_dbg("%s: key type: %s\n", path, EVP_PKEY_get0_type_name(to_compare));
+
+	/* compare keys */
+	switch (EVP_PKEY_eq(pkey, to_compare)) {
+	case 0:
+		r = 0;
+		pr_dbg("%s: no match\n", path);
+		break;
+	case 1:
+		r = 1;
+		pr_dbg("%s: match\n", path);
+		break;
+	case -1:
+		r = -EBADF;
+		pr_dbg("%s: wrong type\n", path);
+		break;
+	case -2:
+		r = -EOPNOTSUPP;
+		pr_dbg("%s: not supported\n", path);
+		break;
+	default:
+		r = -EFAULT;
+		pr_dbg("%s: EVP_PKEY_cmp: [%d] %s\n", path, -r, strerror(-r));
+		break;
+	}
+
+exit:
+	if (fd >= 0)
+		close(fd);
+	EVP_PKEY_free(to_compare);
+	return r;
+}
+
+static int match_pubkey(const char* path, const char* dir, const EVP_PKEY* pkey)
+{
+	(void) dir;
+	if (path) {
+		pr_dbg("match container pubkey to --pubkey\n");
+		if (read_and_compare_public_key(path, pkey) == 1)
+			return 0;
+	}
+
+	return -EBADF;
+}
+
 /* Return 1 for valid, 0 for invalid, else negative errno for error */
 static int validate_digest(int fd, uint8_t* data_buf, size_t data_size, const struct section* digest, EVP_PKEY* pkey)
 {
@@ -597,12 +678,12 @@ static void print_usage(void)
 }
 
 enum options {
-	OPT_VERIFY_ONLY = 1 << 0,
-	OPT_CREATE      = 1 << 1,
-	OPT_OPEN        = 1 << 2,
-	OPT_FORCE       = 1 << 3,
-	OPT_ROOTHASH    = 1 << 4,
-	OPT_PUBKEY_ANY  = 1 << 5,
+	OPT_VERIFY_ONLY  = 1 << 0,
+	OPT_CREATE       = 1 << 1,
+	OPT_OPEN         = 1 << 2,
+	OPT_FORCE        = 1 << 3,
+	OPT_ROOTHASH     = 1 << 4,
+	OPT_PUBKEY_ANY   = 1 << 5,
 };
 
 struct config {
@@ -613,6 +694,7 @@ struct config {
 	char *key_pkcs11;
 	char *pubkey_path;
 	char *pubkey_pkcs11;
+	char *pubkey_dir;
 
 };
 
@@ -722,7 +804,7 @@ int main(int argc, char *argv[])
 	memset(&container, 0, sizeof(container));
 
 	/* open file and validate if found */
-	int filefd = open(cfg.filepath, O_RDONLY);
+	int filefd = open(cfg.filepath, O_RDONLY | O_EXCL | O_CLOEXEC);
 	if (filefd >= 0) {
 		pr_dbg("%s: found file\n", cfg.filepath);
 		r = read_container(&container, filefd);
@@ -741,6 +823,23 @@ int main(int argc, char *argv[])
 		goto exit;
 	}
 
+	/* Match pubkey if container is valid.
+	 *
+	 * If OPT_PUBKEY_ANY is set then we are
+	 * satisfied with digest verification towards
+	 * pubkey provided by container as part of container
+	 * validation. */
+	if (((container.opt & CONTAINER_VALID) == CONTAINER_VALID)
+			&& ((cfg.opt & OPT_PUBKEY_ANY) != OPT_PUBKEY_ANY)
+			&& (match_pubkey(cfg.pubkey_path, cfg.pubkey_dir, container.pkey) != 0)) {
+		r = -EBADF;
+		pr_err("pubkey validation failed\n");
+		goto exit;
+	}
+
+	//FIXME: review --verify and --rootash container vs filefd validation
+
+	/* verify data and tree to roothash */
 	if ((cfg.opt & OPT_VERIFY_ONLY) == OPT_VERIFY_ONLY) {
 		r = verify_container(cfg.filepath, &container);
 		if (r != 0)
@@ -754,6 +853,7 @@ int main(int argc, char *argv[])
 		goto exit;
 	}
 
+	/* dump roothash */
 	if ((cfg.opt & OPT_ROOTHASH) == OPT_ROOTHASH) {
 		if (filefd < 0) {
 			r = -ENOENT;
@@ -773,7 +873,6 @@ int main(int argc, char *argv[])
 		r = 0;
 		goto exit;
 	}
-
 
 exit:
 	if (filefd >= 0)
