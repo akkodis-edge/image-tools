@@ -13,6 +13,7 @@
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/x509.h>
+#include <openssl/pem.h>
 #include <libcryptsetup.h>
 
 // FIXME:  Add test if FILE is symbolic link
@@ -338,6 +339,15 @@ static int error_cb(const char* input, size_t len, void* priv)
 	return 0;
 }
 
+static int parse_public_key(const uint8_t* data, long size, EVP_PKEY** pkey)
+{
+	const unsigned char *tmp = data;
+	*pkey = d2i_PUBKEY(NULL, &tmp, size);
+	if (*pkey == NULL)
+		return -EPROTONOSUPPORT;
+	return 0;
+}
+
 static int read_public_key(int fd, const struct section* section, EVP_PKEY** pkey)
 {
 	if (section->size > LONG_MAX) /* d2i_PUBKEY() length argument is type long */
@@ -352,18 +362,9 @@ static int read_public_key(int fd, const struct section* section, EVP_PKEY** pke
 		goto exit;
 
 	/* parse key */
-	const unsigned char *tmp = buf;
-	/* Ensure openssl errors are our errors */
-	ERR_clear_error();
-	*pkey = d2i_PUBKEY(NULL, &tmp, (long) section->size);
-	if (*pkey == NULL) {
-		if (dbg) {
-			pr_dbg("Failed pubkey parsing\n");
-			ERR_print_errors_cb(error_cb, NULL);
-		}
-		r = -EPROTONOSUPPORT;
+	r = parse_public_key(buf, section->size, pkey);
+	if (r != 0)
 		goto exit;
-	}
 
 	r = 0;
 exit:
@@ -376,67 +377,119 @@ exit:
  *        0 if not equal
  *        negative errno for error
  */
-static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
+static int compare_public_key_der(const uint8_t* der, long size, const EVP_PKEY* pkey)
 {
 	EVP_PKEY *to_compare = NULL;
 
-	/* open pubkey */
-	int r = 0;
-	const int fd = open(path, O_RDONLY | O_EXCL | O_CLOEXEC);
-	if (fd < 0) {
-		r = -errno;
-		pr_err("%s: open [%d] %s\n", path, -r, strerror(-r));
-		goto exit;
-	}
-
-	/* get size */
-	const off64_t pos = lseek64(fd, 0, SEEK_END);
-	if (pos < 0) {
-		r = -errno;
-		pr_err("%s: seek [%d] %s\n", path, -r, strerror(-r));
-		goto exit;
-	}
-	const struct section section = {
-		.offset = 0,
-		.size = (size_t) pos,
-	};
-
-	/* read key */
-	r = read_public_key(fd, &section, &to_compare);
+	/* parse key */
+	int r = parse_public_key(der, size, &to_compare);
 	if (r != 0) {
-		pr_dbg("%s: read_public_key [%d] %s\n", path, -r, strerror(-r));
+		pr_dbg("parse_public_key: [%d] %s\n", -r, strerror(-r));
 		goto exit;
 	}
-	pr_dbg("%s: key type: %s\n", path, EVP_PKEY_get0_type_name(to_compare));
+	pr_dbg("key type: %s\n", EVP_PKEY_get0_type_name(to_compare));
 
 	/* compare keys */
 	switch (EVP_PKEY_eq(pkey, to_compare)) {
 	case 0:
 		r = 0;
-		pr_dbg("%s: no match\n", path);
 		break;
 	case 1:
 		r = 1;
-		pr_dbg("%s: match\n", path);
 		break;
 	case -1:
 		r = -EBADF;
-		pr_dbg("%s: wrong type\n", path);
 		break;
 	case -2:
 		r = -EOPNOTSUPP;
-		pr_dbg("%s: not supported\n", path);
 		break;
 	default:
 		r = -EFAULT;
-		pr_dbg("%s: EVP_PKEY_cmp: [%d] %s\n", path, -r, strerror(-r));
 		break;
 	}
 
 exit:
-	if (fd >= 0)
-		close(fd);
 	EVP_PKEY_free(to_compare);
+	return r;
+}
+
+static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
+{
+	int r = 0;
+	/* Open as stream for PEM_read() compatibility */
+	FILE *file = fopen(path, "r");
+	if (file == NULL) {
+		r = -errno;
+		pr_err("%s: fdopen [%d] %s\n", path, -r, strerror(-r));
+		return r;
+	}
+
+	pr_dbg("%s: compare\n", path);
+
+	/* Ensure openssl errors are our errors */
+	ERR_clear_error();
+
+	uint8_t *data = NULL;
+	char *name = NULL;
+	char *header = NULL;
+	long len = 0;
+
+	/* Check first if pubkey is DER formatted
+	 * by reading in 1MB to pre-allocated
+	 * buffers mimicking PEM_read() usage. */
+	const size_t der_buf_size = 1 * 1024 * 1024;
+	r = -ENOMEM;
+	data = OPENSSL_malloc(der_buf_size);
+	if (data == NULL)
+		goto exit;
+	name = OPENSSL_strdup("PUBLIC KEY");
+	if (name == NULL)
+		goto exit;
+	len = fread(data, 1, der_buf_size, file);
+
+	/* rewind file for PEM parsing if DER fails */
+	rewind(file);
+
+	do {
+		if (strcmp(name, "PUBLIC KEY") == 0) {
+			r = compare_public_key_der(data, len, pkey);
+			OPENSSL_free(name);
+			name = NULL;
+			OPENSSL_free(header);
+			header = NULL;
+			OPENSSL_free(data);
+			data = NULL;
+			switch (r) {
+			case 0:
+				pr_dbg("%s: no match\n", path);
+				break;
+			case 1:
+				pr_dbg("%s: match\n", path);
+				r = 1;
+				goto exit;
+			default:
+				pr_dbg("%s: [%d] %s\n", path, -r, strerror(-r));
+				break;
+			}
+		}
+	/* Check for PEM, single or stack */
+	} while (PEM_read(file, &name, &header, &data, &len) == 1);
+
+
+	/* Check for error or end of PEM stack */
+	if (ERR_peek_last_error() != PEM_R_NO_START_LINE) {
+		if (dbg == 1) {
+			pr_dbg("%s: failed pem pubkey parsing\n", path);
+			ERR_print_errors_cb(error_cb, NULL);
+		}
+	}
+
+	r = 0;
+exit:
+	OPENSSL_free(data);
+	OPENSSL_free(name);
+	OPENSSL_free(header);
+	fclose(file);
 	return r;
 }
 
@@ -845,10 +898,10 @@ int main(int argc, char *argv[])
 		if (r != 0)
 			goto exit;
 		if ((container.opt & CONTAINER_VERIFIED) == CONTAINER_VERIFIED) {
-			pr_dbg("container - verified\n");
+			pr_info("container - verified\n");
 			goto exit;
 		}
-		pr_dbg("container - corrupt\n");
+		pr_err("container - corrupt\n");
 		r = -EBADF;
 		goto exit;
 	}
