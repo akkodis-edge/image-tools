@@ -189,7 +189,6 @@ struct section {
 enum container_options {
 	CONTAINER_NONE     = 0,
 	CONTAINER_VALID    = 1 << 0, /* container header validated */
-	CONTAINER_VERIFIED = 1 << 1, /* container data and tree validated to roothash */
 };
 
 struct container {
@@ -808,16 +807,6 @@ static int verity_close(const char* mapperpath, int force)
 	return 0;
 }
 
-static int verify_container(const char* path, struct container* container)
-{
-	int r = verity_open(path, NULL, CRYPT_VERITY_CHECK_HASH, container);
-	if (r != 0)
-		return r;
-
-	container->opt |= CONTAINER_VERIFIED;
-	return 0;
-}
-
 static void print_usage(void)
 {
 	printf("container-util, operate on image containers\n");
@@ -995,7 +984,6 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 
-
 	if (cfg.filepath == NULL) {
 		fprintf(stderr, "Missing mandatory argument FILE\n");
 		return EINVAL;
@@ -1043,23 +1031,17 @@ int main(int argc, char *argv[])
 	struct container container;
 	memset(&container, 0, sizeof(container));
 
-	/* open file and validate if found */
+	/* open FILE and validate as container */
 	int filefd = open(cfg.filepath, O_RDONLY | O_EXCL | O_CLOEXEC);
-	if (filefd >= 0) {
-		pr_dbg("%s: found file\n", cfg.filepath);
-		r = read_container(&container, filefd);
-		if (r != 0) {
-			pr_dbg("failed reading [%d]: %s\n", -r, strerror(-r));
-			goto exit;
-		}
-	}
-	else if (errno == ENOENT) {
-		/* Depending on operation a non existing file might be OK. */
-		pr_dbg("%s: not found\n", cfg.filepath);
-	}
-	else {
+	if (filefd < 0) {
 		r = -errno;
 		pr_err("%s: [%d] %s\n", cfg.filepath, -r, strerror(-r));
+		goto exit;
+	}
+
+	r = read_container(&container, filefd);
+	if (r != 0) {
+		pr_err("%s: failed reading: [%d] %s\n", -r, strerror(-r));
 		goto exit;
 	}
 
@@ -1079,35 +1061,21 @@ int main(int argc, char *argv[])
 
 	/* verify data and tree to roothash */
 	if ((cfg.opt & OPT_VERIFY_ONLY) == OPT_VERIFY_ONLY) {
-		if (filefd < 0) {
-			pr_err("container - not found\n");
-			r = -ENOENT;
-			goto exit;
-		}
 		if ((container.opt & CONTAINER_VALID) != CONTAINER_VALID) {
 			pr_err("container - not a container\n");
 			r = -EBADF;
 			goto exit;
 		}
-		r = verify_container(cfg.filepath, &container);
-		if (r != 0)
+
+		r = verity_open(cfg.filepath, NULL, CRYPT_VERITY_CHECK_HASH, &container);
+		if (r < 0)
 			goto exit;
-		if ((container.opt & CONTAINER_VERIFIED) != CONTAINER_VERIFIED) {
-			pr_err("container - corrupt\n");
-			r = -EBADF;
-			goto exit;
-		}
 		pr_info("container - verified\n");
 		goto exit;
 	}
 
 	/* dump roothash */
 	if ((cfg.opt & OPT_ROOTHASH) == OPT_ROOTHASH) {
-		if (filefd < 0) {
-			pr_err("container - not found\n");
-			r = -ENOENT;
-			goto exit;
-		}
 		if ((container.opt & CONTAINER_VALID) != CONTAINER_VALID) {
 			pr_err("container - not a container\n");
 			r = -EBADF;
@@ -1126,11 +1094,6 @@ int main(int argc, char *argv[])
 
 	/* open as devicemapper block device */
 	if ((cfg.opt & OPT_OPEN) == OPT_OPEN) {
-		if (filefd < 0) {
-			pr_err("container - not found\n");
-			r = -ENOENT;
-			goto exit;
-		}
 		if ((container.opt & CONTAINER_VALID) != CONTAINER_VALID) {
 			pr_err("container - not a container\n");
 			r = -EBADF;
@@ -1142,6 +1105,17 @@ int main(int argc, char *argv[])
 		goto exit;
 	}
 
+	/* create new header */
+	if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
+		if (((container.opt & CONTAINER_VALID) == CONTAINER_VALID)
+			&& ((cfg.opt & OPT_FORCE) != OPT_FORCE)) {
+			pr_err("FILE is valid container, use --force to overwrite\n");
+			r = -EBADF;
+			goto exit;
+		}
+	}
+
+	r = -EINVAL;
 exit:
 	if (filefd >= 0)
 		close(filefd);
