@@ -790,6 +790,24 @@ exit:
 	return r;
 }
 
+static int verity_close(const char* mapperpath, int force)
+{
+	struct crypt_device *cd = NULL;
+	int r = crypt_init_by_name(&cd, mapperpath);
+	if (r != 0) {
+		pr_err("crypt_init_by_name: [%d] %s\n", -r, strerror(-r));
+		return r;
+	}
+
+	r = crypt_deactivate_by_name(cd, mapperpath, force ? CRYPT_DEACTIVATE_FORCE : CRYPT_DEACTIVATE_DEFERRED);
+	crypt_free(cd);
+	if (r != 0) {
+		pr_err("crypt_deactivate_by_name: [%d] %s\n", -r, strerror(-r));
+		return r;
+	}
+	return 0;
+}
+
 static int verify_container(const char* path, struct container* container)
 {
 	int r = verity_open(path, NULL, CRYPT_VERITY_CHECK_HASH, container);
@@ -814,6 +832,11 @@ static void print_usage(void)
 	printf("  --verify         Verify signature\n");
 	printf("  --create         Create signature\n");
 	printf("  --open           Create a mapping with provided name\n");
+	printf("  --close          Close a mapping with provided name\n");
+	printf("                     Lazy deactivation by default where device\n");
+	printf("                     is closed once last user releases it.\n");
+	printf("                     Using --force will immediately deactivate and\n");
+	printf("                     replace with error device for active users.\n");
 	printf("  --keyfile        Path to signing key\n");
 	printf("  --key-pkcs11     PKCS11 url for signing key\n");
 	printf("  --pubkey         Path to validation key\n");
@@ -853,6 +876,7 @@ enum options {
 	OPT_FORCE        = 1 << 3,
 	OPT_ROOTHASH     = 1 << 4,
 	OPT_PUBKEY_ANY   = 1 << 5,
+	OPT_CLOSE        = 1 << 6,
 };
 
 struct config {
@@ -886,6 +910,14 @@ int main(int argc, char *argv[])
 				return EINVAL;
 			}
 			cfg.opt |= OPT_OPEN;
+			cfg.mapperpath = argv[i];
+		}
+		else if (strcmp("--close", argv[i]) == 0) {
+			if (++i >= argc) {
+				fprintf(stderr, "invalid argument --close\n");
+				return EINVAL;
+			}
+			cfg.opt |= OPT_CLOSE;
 			cfg.mapperpath = argv[i];
 		}
 		else if (strcmp("--keyfile", argv[i]) == 0) {
@@ -951,10 +983,18 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if ((cfg.opt & (OPT_VERIFY_ONLY | OPT_CREATE | OPT_OPEN | OPT_ROOTHASH)) == 0) {
-		fprintf(stderr, "Missing operation --verify, --create, --open or --roothash\n");
+	if ((cfg.opt & (OPT_VERIFY_ONLY | OPT_CREATE | OPT_OPEN | OPT_ROOTHASH | OPT_CLOSE)) == 0) {
+		fprintf(stderr, "Missing operation --verify, --create, --open, --close or --roothash\n");
 		return EINVAL;
 	}
+
+	/* close verity device */
+	if ((cfg.opt & OPT_CLOSE) == OPT_CLOSE) {
+		if (verity_close(cfg.mapperpath, cfg.opt & OPT_FORCE) != 0)
+			return EFAULT;
+		return 0;
+	}
+
 
 	if (cfg.filepath == NULL) {
 		fprintf(stderr, "Missing mandatory argument FILE\n");
