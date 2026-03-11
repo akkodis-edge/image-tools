@@ -16,11 +16,21 @@
 #include <openssl/err.h>
 #include <openssl/x509.h>
 #include <openssl/pem.h>
+#include <openssl/provider.h>
+#include <openssl/store.h>
 #include <libcryptsetup.h>
 
 // FIXME:  Add test if FILE is symbolic link
 // FIXME:  GPL-2.0-or-later
 // FIXME:  cryptsetup license
+// FIXME:  Test --pubkey with PEM
+// FIXME:  Test --pubkey with DER
+// FIXME:  Test --pubkey with mixed PEM object types (!= PUBLIC KEY)
+// FIXME:  Test --pubkey-dir
+// FIXME:  Add --dump to print header details incl. signing key type (and hash..?)
+// FIXME:  Select hash based on key type
+// FIXME:  runtime dependency packages: pkcs11-provider
+// FIXME:  Do file-based public keys need to be validated? EVP_PKEY_public_check() ?
 
 /*
  * Following functions are copied from cryptsetup/lib/utils_crypt.c
@@ -379,16 +389,10 @@ exit:
  *        0 if not equal
  *        negative errno for error
  */
-static int compare_public_key_der(const uint8_t* der, long size, const EVP_PKEY* pkey)
+static int compare_public_key(const EVP_PKEY* to_compare, const EVP_PKEY* pkey)
 {
-	EVP_PKEY *to_compare = NULL;
-
-	/* parse key */
-	int r = parse_public_key(der, size, &to_compare);
-	if (r != 0)
-		goto exit;
-
 	pr_dbg("key type: %s\n", EVP_PKEY_get0_type_name(to_compare));
+	int r = 0;
 
 	/* compare keys */
 	switch (EVP_PKEY_eq(pkey, to_compare)) {
@@ -408,8 +412,24 @@ static int compare_public_key_der(const uint8_t* der, long size, const EVP_PKEY*
 		r = -EFAULT;
 		break;
 	}
+	return r;
+}
 
-exit:
+/*
+ * return 1 if equal
+ *        0 if not equal
+ *        negative errno for error
+ */
+static int compare_public_key_der(const uint8_t* der, long size, const EVP_PKEY* pkey)
+{
+	/* parse key */
+	EVP_PKEY *to_compare = NULL;
+	int r = parse_public_key(der, size, &to_compare);
+	if (r != 0)
+		return r;
+
+	/* compare keys */
+	r = compare_public_key(to_compare, pkey);
 	EVP_PKEY_free(to_compare);
 	return r;
 }
@@ -466,6 +486,7 @@ static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
 		OPENSSL_free(data);
 		data = NULL;
 
+
 		if (r == 1) {
 			pr_info("%s: pubkey used for validation\n", path);
 			goto exit;
@@ -505,6 +526,7 @@ static int read_and_compare_public_dir(const char* pubkey_dir, const EVP_PKEY* p
 			pr_err("%s: failed asprintf: [%d]: %s\n", pubkey_dir, -r, strerror(-r));
 			goto exit;
 		}
+		/* Attemt comparison if path is regular file */
 		struct stat st;
 		memset(&st, 0, sizeof(st));
 		r = 0;
@@ -529,7 +551,47 @@ exit:
 	return r;
 }
 
-static int match_pubkey(const char* pubkey, const char* pubkey_dir, const EVP_PKEY* pkey)
+static int read_and_compare_public_pkcs11(const char* pubkey_pkcs11, const EVP_PKEY* pkey)
+{
+	(void) pkey;
+
+	/* Ensure openssl errors are our errors */
+	ERR_clear_error();
+
+	OSSL_STORE_CTX *store = OSSL_STORE_open(pubkey_pkcs11, NULL, NULL, NULL, NULL);
+	if (store == NULL) {
+		pr_err("pkcs11 OSSL_STORE_open failed\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		return -EFAULT;
+	}
+
+	/* Notify store we are looking for public key */
+	int r = OSSL_STORE_expect(store, OSSL_STORE_INFO_PUBKEY);
+	if (r != 1) {
+		pr_err("pkcs11 OSSL_STORE_expect failed\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		return -EFAULT;
+	}
+
+	/* Search for pubkey in store */
+	OSSL_STORE_INFO *info = NULL;
+	while((info = OSSL_STORE_load(store)) != NULL) {
+		EVP_PKEY* to_compare = OSSL_STORE_INFO_get0_PUBKEY(info);
+		r = to_compare != NULL ? compare_public_key(to_compare, pkey) : 0;
+		OSSL_STORE_INFO_free(info);
+		info = NULL;
+		if (r == 1)
+			return r;
+	}
+
+	/* OSSL_STORE_close(store);
+	* will cause a segmentation fault on OSSL_PROVIDER_unload(pkcs11_provider).
+	* Is this close method redundant? */
+
+	return 0;
+}
+
+static int match_pubkey(const char* pubkey, const char* pubkey_dir, const char* pubkey_pkcs11, const EVP_PKEY* pkey)
 {
 	if (pubkey) {
 		pr_dbg("match container pubkey to --pubkey\n");
@@ -539,6 +601,11 @@ static int match_pubkey(const char* pubkey, const char* pubkey_dir, const EVP_PK
 	if (pubkey_dir) {
 		pr_dbg("match container pubkey to --pubkey-dir\n");
 		if (read_and_compare_public_dir(pubkey_dir, pkey) == 1)
+			return 0;
+	}
+	if (pubkey_pkcs11) {
+		pr_dbg("match container pubkey to --pubkey-pkcs11\n");
+		if (read_and_compare_public_pkcs11(pubkey_pkcs11, pkey) == 1)
 			return 0;
 	}
 
@@ -562,7 +629,6 @@ static int validate_digest(int fd, uint8_t* data_buf, size_t data_size, const st
 	r = pread_bytes(fd, digest->offset, digest_buf, digest->size);
 	if (r != 0)
 		goto exit;
-
 
 	/* Ensure openssl errors are our errors */
 	ERR_clear_error();
@@ -901,6 +967,29 @@ int main(int argc, char *argv[])
 		return EINVAL;
 	}
 
+	/* If pkcs11 provider is required then default provider must be explicitly
+	 * loaded as well.
+	 * Always load default provider and load pkcs11 if required. */
+
+	/* Ensure openssl errors are our errors */
+	ERR_clear_error();
+
+	OSSL_PROVIDER *provider_default = OSSL_PROVIDER_load(NULL, "default");
+	if (provider_default == NULL) {
+		pr_err("Failed loading openssl default provider\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		return EFAULT;
+	}
+	OSSL_PROVIDER *provider_pkcs11 = NULL;
+	if ((cfg.pubkey_pkcs11 != NULL) | (cfg.key_pkcs11 != NULL)) {
+		provider_pkcs11 = OSSL_PROVIDER_load(NULL, "pkcs11");
+		if (provider_pkcs11 == NULL) {
+			pr_err("Failed loading openssl pkcs11 provider\n");
+			ERR_print_errors_cb(error_cb, NULL);
+			return EFAULT;
+		}
+	}
+
 	int r = 0;
 	struct container container;
 	memset(&container, 0, sizeof(container));
@@ -933,7 +1022,7 @@ int main(int argc, char *argv[])
 	 * validation. */
 	if (((container.opt & CONTAINER_VALID) == CONTAINER_VALID)
 			&& ((cfg.opt & OPT_PUBKEY_ANY) != OPT_PUBKEY_ANY)
-			&& (match_pubkey(cfg.pubkey_path, cfg.pubkey_dir, container.pkey) != 0)) {
+			&& (match_pubkey(cfg.pubkey_path, cfg.pubkey_dir, cfg.pubkey_pkcs11, container.pkey) != 0)) {
 		r = -EBADF;
 		pr_err("pubkey validation failed\n");
 		goto exit;
@@ -980,6 +1069,7 @@ exit:
 	if (filefd >= 0)
 		close(filefd);
 	destroy_container(&container);
-	pr_dbg("exit: %d\n", r);
+	OSSL_PROVIDER_unload(provider_default);
+	OSSL_PROVIDER_unload(provider_pkcs11);
 	return -r;
 }
