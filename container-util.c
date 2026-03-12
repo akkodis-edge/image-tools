@@ -31,6 +31,7 @@
 // FIXME:  Select hash based on key type
 // FIXME:  runtime dependency packages: pkcs11-provider
 // FIXME:  Do file-based public keys need to be validated? EVP_PKEY_public_check() ?
+// FIXME:  data 4096 aligned
 
 /*
  * Following functions are copied from cryptsetup/lib/utils_crypt.c
@@ -681,7 +682,7 @@ static int read_container(struct container* container, int fd)
 	switch (r) {
 	case 0:
 		break;
-	case ENOMSG:
+	case -ENOMSG:
 		container->opt = CONTAINER_NONE;
 		return 0;
 		break;
@@ -791,6 +792,7 @@ exit:
 
 static int verity_close(const char* mapperpath, int force)
 {
+	/* init */
 	struct crypt_device *cd = NULL;
 	int r = crypt_init_by_name(&cd, mapperpath);
 	if (r != 0) {
@@ -798,13 +800,107 @@ static int verity_close(const char* mapperpath, int force)
 		return r;
 	}
 
-	r = crypt_deactivate_by_name(cd, mapperpath, force ? CRYPT_DEACTIVATE_FORCE : CRYPT_DEACTIVATE_DEFERRED);
+	/* close */
+	r = crypt_deactivate_by_name(cd, mapperpath, force ? CRYPT_DEACTIVATE_FORCE : 0);
 	crypt_free(cd);
 	if (r != 0) {
 		pr_err("crypt_deactivate_by_name: [%d] %s\n", -r, strerror(-r));
 		return r;
 	}
 	return 0;
+}
+
+static int verity_create(const char* path, const char* tree, uint8_t** roothash, size_t* roothash_size)
+{
+	uint8_t *hash = NULL;
+
+	/* init */
+	struct crypt_device *cd = NULL;
+	int r = crypt_init(&cd, tree);
+	if (r != 0) {
+		pr_err("crypt_init: [%d] %s\n", -r, strerror(-r));
+		return r;
+	}
+
+	/* prepare */
+	struct crypt_params_verity params;
+	memset(&params, 0, sizeof(params));
+	params.hash_name = "sha256";
+	params.data_device = path;
+	params.data_block_size = 4096;
+	params.hash_block_size = 4096;
+	params.hash_type = 1;
+	params.salt_size = 32;
+	params.salt = NULL;
+	params.flags = CRYPT_VERITY_CREATE_HASH;
+
+	/* format */
+	r = crypt_format(cd, CRYPT_VERITY, NULL, NULL, NULL, NULL, 0, &params);
+	if (r != 0) {
+		pr_err("crypt_format: [%d] %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	if (dbg) {
+		r = crypt_dump(cd);
+		if (r != 0)
+			pr_dbg("crypt_dump: [%d] %s\n", -r, strerror(-r));
+	}
+
+	/* retrieve roothash */
+	const int hash_size = crypt_get_volume_key_size(cd);
+	hash = malloc(hash_size);
+	if (hash == NULL) {
+		r = -ENOMEM;
+		goto exit;
+	}
+	size_t hash_bytes_returned = (size_t) hash_size;
+	r = crypt_volume_key_get(cd, CRYPT_ANY_SLOT, (char*) hash, &hash_bytes_returned, NULL, 0);
+	if (r < 0) {
+		pr_err("crypt_volume_key_get: [%d] %s\n", -r, strerror(-r));
+		goto exit;
+	}
+	if (hash_bytes_returned != (size_t) hash_size) {
+		r = -EFAULT;
+		pr_err("crypt_volume_key_get: unexpected roothash size: %zu\n", hash_bytes_returned);
+		goto exit;
+	}
+	*roothash = hash;
+	hash = NULL;
+	*roothash_size = hash_bytes_returned;
+
+	r = 0;
+exit:
+	crypt_free(cd);
+	if (hash != NULL)
+		free(hash);
+	return r;
+}
+
+static int write_container(int fd, const char* path, const char* key, const char* key_pkcs11, struct container* container)
+{
+	(void) fd; (void) key; (void) key_pkcs11;
+	int r = 0;
+	/* create temp-file for hash tree output */
+	char tmppath[] = "/tmp/ctutil-XXXXXX";
+	int tmpfd = mkostemp(tmppath, O_CLOEXEC);
+	if (tmpfd < 0) {
+		r = -errno;
+		pr_err("mktmp: [%d] %s\n", -r, strerror(-r));
+		return r;
+	}
+
+	/* verity format */
+	r = verity_create(path, tmppath, &container->roothash, &container->roothash_size);
+	if (r != 0)
+		goto exit;
+
+	r = 0;
+exit:
+	if (unlink(tmppath) != 0)
+		pr_info("failed removing tmpfile: %s\n", tmppath);
+	close(tmpfd);
+	return r;
 }
 
 static void print_usage(void)
@@ -822,8 +918,6 @@ static void print_usage(void)
 	printf("  --create         Create signature\n");
 	printf("  --open           Create a mapping with provided name\n");
 	printf("  --close          Close a mapping with provided name\n");
-	printf("                     Lazy deactivation by default where device\n");
-	printf("                     is closed once last user releases it.\n");
 	printf("                     Using --force will immediately deactivate and\n");
 	printf("                     replace with error device for active users.\n");
 	printf("  --keyfile        Path to signing key\n");
@@ -895,7 +989,7 @@ int main(int argc, char *argv[])
 		}
 		else if (strcmp("--open", argv[i]) == 0) {
 			if (++i >= argc) {
-				fprintf(stderr, "invalid argument --open\n");
+				pr_err("invalid argument --open\n");
 				return EINVAL;
 			}
 			cfg.opt |= OPT_OPEN;
@@ -903,7 +997,7 @@ int main(int argc, char *argv[])
 		}
 		else if (strcmp("--close", argv[i]) == 0) {
 			if (++i >= argc) {
-				fprintf(stderr, "invalid argument --close\n");
+				pr_err("invalid argument --close\n");
 				return EINVAL;
 			}
 			cfg.opt |= OPT_CLOSE;
@@ -911,35 +1005,35 @@ int main(int argc, char *argv[])
 		}
 		else if (strcmp("--keyfile", argv[i]) == 0) {
 			if (++i >= argc) {
-				fprintf(stderr, "invalid argument --keyfile\n");
+				pr_err("invalid argument --keyfile\n");
 				return EINVAL;
 			}
 			cfg.key_path = argv[i];
 		}
 		else if (strcmp("--key-pkcs11", argv[i]) == 0) {
 			if (++i >= argc) {
-				fprintf(stderr, "invalid argument --key-pkcs11\n");
+				pr_err("invalid argument --key-pkcs11\n");
 				return EINVAL;
 			}
 			cfg.key_pkcs11 = argv[i];
 		}
 		else if (strcmp("--pubkey", argv[i]) == 0) {
 			if (++i >= argc) {
-				fprintf(stderr, "invalid argument --pubkey\n");
+				pr_err("invalid argument --pubkey\n");
 				return EINVAL;
 			}
 			cfg.pubkey_path = argv[i];
 		}
 		else if (strcmp("--pubkey-pkcs11", argv[i]) == 0) {
 			if (++i >= argc) {
-				fprintf(stderr, "invalid argument --pubkey-pkcs11\n");
+				pr_err("invalid argument --pubkey-pkcs11\n");
 				return EINVAL;
 			}
 			cfg.pubkey_pkcs11 = argv[i];
 		}
 		else if (strcmp("--pubkey-dir", argv[i]) == 0) {
 			if (++i >= argc) {
-				fprintf(stderr, "invalid argument --pubkey-dir\n");
+				pr_err("invalid argument --pubkey-dir\n");
 				return EINVAL;
 			}
 			cfg.pubkey_dir = argv[i];
@@ -967,13 +1061,13 @@ int main(int argc, char *argv[])
 			cfg.filepath = argv[i];
 		}
 		else {
-			fprintf(stderr, "invalid argument: %s\n", argv[i]);
+			pr_err("invalid argument: %s\n", argv[i]);
 			return EINVAL;
 		}
 	}
 
 	if ((cfg.opt & (OPT_VERIFY_ONLY | OPT_CREATE | OPT_OPEN | OPT_ROOTHASH | OPT_CLOSE)) == 0) {
-		fprintf(stderr, "Missing operation --verify, --create, --open, --close or --roothash\n");
+		pr_err("Missing operation --verify, --create, --open, --close or --roothash\n");
 		return EINVAL;
 	}
 
@@ -985,7 +1079,7 @@ int main(int argc, char *argv[])
 	}
 
 	if (cfg.filepath == NULL) {
-		fprintf(stderr, "Missing mandatory argument FILE\n");
+		pr_err("Missing mandatory argument FILE\n");
 		return EINVAL;
 	}
 
@@ -993,15 +1087,20 @@ int main(int argc, char *argv[])
 			&& cfg.pubkey_path == NULL
 			&& cfg.pubkey_pkcs11 == NULL
 			&& cfg.pubkey_dir == NULL) {
-		fprintf(stderr, "Missing --pubkey, --pubkey-pkcs11, --pubkey-dir or --pubkey-any\n");
+		pr_err("Missing --pubkey, --pubkey-pkcs11, --pubkey-dir or --pubkey-any\n");
 		return EINVAL;
 	}
 
-	if ((cfg.opt & OPT_CREATE) == OPT_CREATE
-			&& cfg.key_path == NULL
-			&& cfg.key_pkcs11 == NULL) {
-		fprintf(stderr, "Missing key --keyfile or --key-pkcs11 for --create\n");
-		return EINVAL;
+	EVP_PKEY *signing_key = NULL;
+	if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
+		if ((cfg.key_path == NULL) && (cfg.key_pkcs11 == NULL)) {
+			pr_err("Missing key --keyfile or --key-pkcs11 for --create\n");
+			return EINVAL;
+		}
+		if ((cfg.key_path != NULL) && (cfg.key_pkcs11 != NULL)) {
+			pr_err("--keyfile and --key-pkcs11 are mutually exclusive\n");
+			return EINVAL;
+		}
 	}
 
 	/* If pkcs11 provider is required then default provider must be explicitly
@@ -1032,16 +1131,16 @@ int main(int argc, char *argv[])
 	memset(&container, 0, sizeof(container));
 
 	/* open FILE and validate as container */
-	int filefd = open(cfg.filepath, O_RDONLY | O_EXCL | O_CLOEXEC);
+	int filefd = open(cfg.filepath, O_RDONLY | O_CLOEXEC);
 	if (filefd < 0) {
 		r = -errno;
-		pr_err("%s: [%d] %s\n", cfg.filepath, -r, strerror(-r));
+		pr_err("%s: [%d] %s\n", cfg.filepath, cfg.filepath, -r, strerror(-r));
 		goto exit;
 	}
 
 	r = read_container(&container, filefd);
 	if (r != 0) {
-		pr_err("%s: failed reading: [%d] %s\n", -r, strerror(-r));
+		pr_err("%s: failed reading: [%d] %s\n", cfg.filepath, -r, strerror(-r));
 		goto exit;
 	}
 
@@ -1113,6 +1212,34 @@ int main(int argc, char *argv[])
 			r = -EBADF;
 			goto exit;
 		}
+
+		/* reopen for writing */
+		close(filefd);
+		filefd = open(cfg.filepath, O_RDWR | O_CLOEXEC);
+		if (filefd < 0) {
+			r = -errno;
+			pr_err("%s: [%d] %s\n", cfg.filepath, -r, strerror(-r));
+			goto exit;
+		}
+
+		/* remove header if available */
+		if ((container.opt & CONTAINER_VALID) == CONTAINER_VALID) {
+			if (container.data.offset != 0) {
+				pr_err("expected data offset at 0 but got %" PRId64 "\n", container.data.offset);
+				r = -EFAULT;
+				goto exit;
+			}
+			r = ftruncate64(filefd, container.data.size);
+			if (r != 0) {
+				r = -errno;
+				pr_err("%s: failed truncate: [%d]: %s\n", cfg.filepath, -r, strerror(-r));
+				goto exit;
+			}
+		}
+		/* add header */
+		destroy_container(&container);
+		r = write_container(filefd, cfg.filepath, cfg.key_path, cfg.key_pkcs11, &container);
+		goto exit;
 	}
 
 	r = -EINVAL;
@@ -1122,5 +1249,6 @@ exit:
 	destroy_container(&container);
 	OSSL_PROVIDER_unload(provider_default);
 	OSSL_PROVIDER_unload(provider_pkcs11);
+	EVP_PKEY_free(signing_key);
 	return -r;
 }
