@@ -31,10 +31,9 @@
 // FIXME:  Select hash based on key type
 // FIXME:  runtime dependency packages: pkcs11-provider
 // FIXME:  Do file-based public keys need to be validated? EVP_PKEY_public_check() ?
-// FIXME:  data 4096 aligned
 // FIXME:  Test RSA and ECDSA priv/pub keys
 // FIXME:  Select hashing (i.e. sha256) based on key type
-
+// FIXME:  test input file not multiple of 4096
 /*
  * Following functions are copied from cryptsetup/lib/utils_crypt.c
  *   hex_to_bin()
@@ -214,6 +213,10 @@ static void destroy_container(struct container* container)
 	memset(container, 0, sizeof(*container));
 }
 
+static void dump_header(const struct container* container)
+{
+
+}
 
 static void u32tole(uint32_t in, uint8_t* buf)
 {
@@ -404,6 +407,52 @@ exit:
 	return r;
 }
 
+static int read_private_key_pkcs11(const char* key_pkcs11, EVP_PKEY** pkey)
+{
+	/* Ensure openssl errors are our errors */
+	ERR_clear_error();
+
+	OSSL_STORE_CTX *store = OSSL_STORE_open(key_pkcs11, NULL, NULL, NULL, NULL);
+	if (store == NULL) {
+		pr_err("pkcs11 OSSL_STORE_open failed\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		return -EFAULT;
+	}
+
+	/* Notify store we are looking for public key */
+	int r = OSSL_STORE_expect(store, OSSL_STORE_INFO_PKEY);
+	if (r != 1) {
+		pr_err("pkcs11 OSSL_STORE_expect failed\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		return -EFAULT;
+	}
+
+	/* Search for key in store */
+	OSSL_STORE_INFO *info = NULL;
+	r = 0;
+	while((info = OSSL_STORE_load(store)) != NULL) {
+		EVP_PKEY* key = OSSL_STORE_INFO_get0_PKEY(info);
+		if (key != NULL)
+			r = EVP_PKEY_up_ref(key);
+		OSSL_STORE_INFO_free(info);
+		info = NULL;
+		if (key == NULL)
+			continue;
+		if (r != 1) {
+			pr_err("pkcs11 failed retrieving key\n");
+			return -EFAULT;
+		}
+		*pkey = key;
+		return 0;
+	}
+
+	/* OSSL_STORE_close(store);
+	* will cause a segmentation fault on OSSL_PROVIDER_unload(pkcs11_provider).
+	* Is this close method redundant? */
+
+	return -ENOENT;
+}
+
 static int read_private_key(const char* key_path, const char* key_pkcs11, EVP_PKEY** pkey)
 {
 	int r = -EINVAL;
@@ -414,7 +463,9 @@ static int read_private_key(const char* key_path, const char* key_pkcs11, EVP_PK
 			return r;
 	}
 	if (key_pkcs11 != NULL) {
-
+		r = read_private_key_pkcs11(key_pkcs11, pkey);
+		if (r == 0)
+			return r;
 	}
 
 	return r;
@@ -598,8 +649,6 @@ exit:
 
 static int read_and_compare_public_pkcs11(const char* pubkey_pkcs11, const EVP_PKEY* pkey)
 {
-	(void) pkey;
-
 	/* Ensure openssl errors are our errors */
 	ERR_clear_error();
 
@@ -1321,7 +1370,6 @@ static void print_usage(void)
 {
 	printf("container-util, operate on image containers\n");
 	printf("Usage:   container-util [OPTIONS] FILE\n");
-	printf("Example: serial-echo --mode raw -b 9600 /dev/ttymxc2\n");
 	printf("\n");
 	printf("Options:\n");
 	printf("  -f/--force       Replace existing header\n");
@@ -1341,6 +1389,9 @@ static void print_usage(void)
 	printf("  --pubkey-dir     Path to directory of validation keys\n");
 	printf("  --pubkey-any     Use pubkey from container\n");
 	printf("  --roothash       Dump roothash\n");
+	printf("\n");
+	printf("Input FILE size when creating a container should be a multiple of 4096,"
+			"if not it will be zero-padded\n");
 	printf("\n");
 	printf("Examples:\n");
 	printf("Create container and sign with keyfile:\n");
@@ -1545,8 +1596,10 @@ int main(int argc, char *argv[])
 			goto exit;
 		}
 		r = read_private_key(cfg.key_path, cfg.key_pkcs11, &signing_key);
-		if (r != 0)
+		if (r != 0) {
+			pr_err("Could not read private key: [%d]: %s\n", -r, strerror(-r));
 			goto exit;
+		}
 	}
 
 	struct container container;
