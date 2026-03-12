@@ -32,6 +32,8 @@
 // FIXME:  runtime dependency packages: pkcs11-provider
 // FIXME:  Do file-based public keys need to be validated? EVP_PKEY_public_check() ?
 // FIXME:  data 4096 aligned
+// FIXME:  Test RSA and ECDSA priv/pub keys
+// FIXME:  Select hashing (i.e. sha256) based on key type
 
 /*
  * Following functions are copied from cryptsetup/lib/utils_crypt.c
@@ -212,7 +214,7 @@ static void destroy_container(struct container* container)
 	memset(container, 0, sizeof(*container));
 }
 
-/*
+
 static void u32tole(uint32_t in, uint8_t* buf)
 {
 	buf[0] = in & 0xff;
@@ -220,17 +222,17 @@ static void u32tole(uint32_t in, uint8_t* buf)
 	buf[2] = (in >> 16) & 0xff;
 	buf[3] = (in >> 24) & 0xff;
 }
-*/
+
 static uint32_t u32fromle(const uint8_t* buf)
 {
 	const uint32_t out =
 		buf[0]
 		| (buf[1] << 8)
 		| (buf[2] << 16)
-		| (buf[3] << 24);
+		| ((uint32_t) buf[3] << 24);
 	return out;
 }
-/*
+
 static void u64tole(uint64_t in, uint8_t* buf)
 {
 	buf[0] = in & 0xff;
@@ -242,7 +244,7 @@ static void u64tole(uint64_t in, uint8_t* buf)
 	buf[6] = (in >> 48) & 0xff;
 	buf[7] = (in >> 56) & 0xff;
 }
-*/
+
 static uint64_t u64fromle(const uint8_t* buf)
 {
 	const uint64_t out =
@@ -255,6 +257,51 @@ static uint64_t u64fromle(const uint8_t* buf)
 		| ((uint64_t) buf[6] << 48)
 		| ((uint64_t) buf[7] << 56);
 	return out;
+}
+
+static int write_bytes(int fd, const uint8_t* buf, ssize_t size)
+{
+	ssize_t bytes_remaining = size;
+	uint8_t *tmp = (uint8_t*) buf;
+	while(bytes_remaining > 0) {
+		ssize_t bytes = write(fd, tmp, bytes_remaining);
+		if (bytes < 0)
+			return -errno;
+		if (bytes < 1 || bytes > bytes_remaining)
+			return -EIO;
+		bytes_remaining -= bytes;
+		tmp += bytes;
+	}
+	return 0;
+}
+
+static int pwrite_bytes(int fd, off64_t offset, const uint8_t* buf, ssize_t bytes)
+{
+	const off64_t pos = lseek64(fd, offset, SEEK_SET);
+	if (pos < 0)
+		return -errno;
+	return write_bytes(fd, buf, bytes);
+}
+
+
+static int padto_multiple_of(int fd, off64_t multiple)
+{
+	if (multiple < 1)
+		return -EINVAL;
+	const off64_t size = lseek64(fd, 0, SEEK_END);
+	if (size < 0)
+		return -errno;
+	const ssize_t remaining = size < multiple ? multiple - size : size % multiple;
+	if (remaining == 0)
+		return 0;
+	pr_dbg("padding by %lld to %lld\n", remaining, size + remaining);
+	uint8_t *buf = malloc(remaining);
+	if (buf == NULL)
+		return -ENOMEM;
+	memset(buf, 0, remaining);
+	int r = write_bytes(fd, buf, remaining);
+	free(buf);
+	return r;
 }
 
 static int read_bytes(int fd, uint8_t* buf, ssize_t size)
@@ -286,6 +333,91 @@ static int error_cb(const char* input, size_t len, void* priv)
 	(void) len;
 	printf("%s\n", input);
 	return 0;
+}
+
+static int parse_private_key(const uint8_t* data, long size, EVP_PKEY** pkey)
+{
+	const unsigned char *tmp = data;
+	*pkey = d2i_AutoPrivateKey(NULL, &tmp, size);
+	if (*pkey == NULL)
+		return -EPROTONOSUPPORT;
+	return 0;
+}
+
+static int read_private_key_file(const char* key_path, EVP_PKEY** pkey)
+{
+	int r = 0;
+	/* Open as stream for PEM_read() compatibility */
+	FILE *file = fopen(key_path, "r");
+	if (file == NULL) {
+		r = -errno;
+		pr_err("%s: fdopen [%d] %s\n", key_path, -r, strerror(-r));
+		return r;
+	}
+
+	uint8_t *data = NULL;
+	char *name = NULL;
+	char *header = NULL;
+	long len = 0;
+
+	/* Check first if key is DER formatted
+	 * by reading in 1MB to pre-allocated
+	 * buffers mimicking PEM_read() usage. */
+	const size_t der_buf_size = 1 * 1024 * 1024;
+	r = -ENOMEM;
+	data = OPENSSL_malloc(der_buf_size);
+	if (data == NULL)
+		goto exit;
+	name = OPENSSL_strdup("PRIVATE KEY");
+	if (name == NULL)
+		goto exit;
+	len = fread(data, 1, der_buf_size, file);
+
+	/* rewind file for PEM parsing if DER fails */
+	rewind(file);
+
+	/* Run once for DER and second time for PEM, PEM stack not supported */
+	for (int i = 0; i < 2; ++i) {
+		pr_dbg("%s: %s checking\n", key_path, i == 0 ? "DER0" : "PEM0");
+		if (strcmp(name, "PRIVATE KEY") == 0)
+			r = parse_private_key(data, len, pkey);
+		OPENSSL_free(name);
+		name = NULL;
+		OPENSSL_free(header);
+		header = NULL;
+		OPENSSL_free(data);
+		data = NULL;
+		if (r != 0)
+			pr_dbg("%s: [%d] %s\n", key_path, -r, strerror(-r));
+		if (r == 0)
+			goto exit;
+		if (PEM_read(file, &name, &header, &data, &len) != 1)
+			break;
+	}
+
+	r = -EBADF;
+exit:
+	OPENSSL_free(data);
+	OPENSSL_free(name);
+	OPENSSL_free(header);
+	fclose(file);
+	return r;
+}
+
+static int read_private_key(const char* key_path, const char* key_pkcs11, EVP_PKEY** pkey)
+{
+	int r = -EINVAL;
+
+	if (key_path != NULL) {
+		r = read_private_key_file(key_path, pkey);
+		if (r == 0)
+			return r;
+	}
+	if (key_pkcs11 != NULL) {
+
+	}
+
+	return r;
 }
 
 static int parse_public_key(const uint8_t* data, long size, EVP_PKEY** pkey)
@@ -525,6 +657,58 @@ static int match_pubkey(const char* pubkey, const char* pubkey_dir, const char* 
 	return -EBADF;
 }
 
+/* buf must be of size HEADER_SIZE */
+static int create_container_header(struct container* container, uint8_t* buf, size_t size)
+{
+	if ((size != HEADER_SIZE) || (buf == NULL) || (container == NULL)
+			|| (container->data.size == 0)   || (container->data.size > INT64_MAX)
+			|| (container->tree.size == 0)   || (container->tree.size > INT64_MAX)
+			|| (container->root.size == 0)   || (container->root.size > INT64_MAX)
+			|| (container->digest.size == 0) || (container->digest.size > INT64_MAX)
+			|| (container->key.size == 0)    || (container->key.size > INT64_MAX))
+		return -EINVAL;
+
+	container->data.offset = 0;
+	if (container->data.size > INT64_MAX)
+		return -EINVAL;
+	container->tree.offset = container->data.offset + container->data.size;
+	if (container->tree.offset > INT64_MAX - (int64_t) container->tree.size)
+		return -EINVAL;
+	container->root.offset = container->tree.offset + container->tree.size;
+	if (container->root.offset > INT64_MAX - (int64_t) container->root.size)
+		return -EINVAL;
+	container->digest.offset = container->root.offset + container->root.size;
+	if (container->digest.offset > INT64_MAX - (int64_t) container->digest.size)
+		return -EINVAL;
+	container->key.offset = container->digest.offset + container->digest.size;
+
+	struct header hdr;
+	memset(&hdr, 0, sizeof(hdr));
+	hdr.magic = HEADER_MAGIC;
+	hdr.tree_offset = container->tree.offset;
+	hdr.root_offset = container->root.offset;
+	hdr.key_offset = container->key.offset;
+	hdr.digest_offset = container->digest.offset;
+
+	pr_dbg("header:\n"
+			"  data:   %-10" PRIu64 " [%zu b]\n"
+			"  tree:   %-10" PRIu64 " [%zu b]\n"
+			"  root:   %-10" PRIu64 " [%zu b]\n"
+			"  key:    %-10" PRIu64 " [%zu b]\n"
+			"  digest: %-10" PRIu64 " [%zu b]\n",
+				container->data.offset, container->data.size, container->tree.offset, container->tree.size,
+				container->root.offset, container->root.size, container->key.offset, container->key.size,
+				container->digest.offset, container->digest.size);
+
+	u32tole(hdr.magic, buf + offsetof(struct header, magic));
+	memcpy(buf + offsetof(struct header, rsvd), &hdr.rsvd, member_size(struct header, rsvd));
+	u64tole(hdr.tree_offset, buf + offsetof(struct header, tree_offset));
+	u64tole(hdr.root_offset, buf + offsetof(struct header, root_offset));
+	u64tole(hdr.digest_offset, buf + offsetof(struct header, digest_offset));
+	u64tole(hdr.key_offset, buf + offsetof(struct header, key_offset));
+	return 0;
+}
+
 static int read_container_header(int fd, struct container* container)
 {
 	/* Reposition to start of header */
@@ -612,8 +796,92 @@ exit:
 	return r;
 }
 
+static int create_digest(const uint8_t* data, size_t data_size, uint8_t** digest, size_t* digest_size, EVP_PKEY* pkey)
+{
+	uint8_t *digest_buf = NULL;
+	size_t digest_buf_size = 0;
+	EVP_MD_CTX *ctx = NULL;
+	EVP_MD *algo = NULL;
+	EVP_PKEY_CTX *pctx = NULL;
+	int r = 0;
+
+	/* Ensure openssl errors are our errors */
+	ERR_clear_error();
+
+	/* prepare validation context */
+	ctx = EVP_MD_CTX_new();
+	if (ctx == NULL) {
+		pr_err("failed creating validation context\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -ENOSYS;
+		goto exit;
+	}
+
+	/* Use SHA256 */
+	algo = EVP_MD_fetch(NULL, "sha256", NULL);
+	if (algo == NULL) {
+		pr_err("failed fetching digest algorithm\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -ENOSYS;
+		goto exit;
+	}
+
+	/* initialize */
+	if (EVP_DigestSignInit(ctx, &pctx, algo, NULL, pkey) != 1) {
+		pr_err("failed initializing digest verification\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -ENOSYS;
+		goto exit;
+	}
+/*
+#include <openssl/store.h>
+	int padding = 0;
+	if (EVP_PKEY_CTX_get_rsa_padding(pctx, &padding) < 1) {
+		pr_err("Cant check padding!");
+		r = -EFAULT;
+		goto exit;
+	}
+	printf("PADDING: %d\n", padding);
+*/
+	/* check digest size */
+	if (EVP_DigestSign(ctx, NULL, &digest_buf_size, data, data_size) != 1) {
+		pr_err("failed calculating digest size\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -ENOSYS;
+		goto exit;
+	}
+
+	/* Allocate */
+	digest_buf = malloc(digest_buf_size);
+	if (digest_buf == NULL) {
+		r = -ENOMEM;
+		goto exit;
+	}
+
+	/* sign digest */
+	if (EVP_DigestSign(ctx, digest_buf, &digest_buf_size, data, data_size) != 1) {
+		pr_err("failed signing digest\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -ENOSYS;
+		goto exit;
+	}
+
+	*digest = digest_buf;
+	digest_buf = NULL;
+	*digest_size = digest_buf_size;
+
+	r = 0;
+exit:
+	if (digest_buf != NULL)
+		free(digest_buf);
+	EVP_MD_CTX_free(ctx);
+	EVP_MD_free(algo);
+	//EVP_PKEY_CTX_free(pctx);
+	return r;
+}
+
 /* Return 1 for valid, 0 for invalid, else negative errno for error */
-static int verify_container_digest(int fd, uint8_t* data_buf, size_t data_size, const struct section* digest, EVP_PKEY* pkey)
+static int verify_container_digest(int fd, const uint8_t* data_buf, size_t data_size, const struct section* digest, EVP_PKEY* pkey)
 {
 	uint8_t *digest_buf = NULL;
 	EVP_MD_CTX *ctx = NULL;
@@ -877,29 +1145,175 @@ exit:
 	return r;
 }
 
-static int write_container(int fd, const char* path, const char* key, const char* key_pkcs11, struct container* container)
+static int cat_container(const struct container* container, int fd, int treefd, uint8_t* roothash, uint8_t* digest, uint8_t* pubkey, uint8_t* header)
 {
-	(void) fd; (void) key; (void) key_pkcs11;
 	int r = 0;
-	/* create temp-file for hash tree output */
+	uint8_t *buf = NULL;
+
+	/* position output at end of file */
+	if (lseek64(fd, 0, SEEK_END) < 0) {
+		r = -errno;
+		pr_err("failed seeking file [%d]: %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	/* position tree at start of file */
+	if (lseek64(treefd, 0, SEEK_SET) < 0) {
+		r = -errno;
+		pr_err("failed seeking tree [%d]: %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	/* write tree to output */
+	ssize_t bytes = 0;
+	const size_t buf_size = 4096;
+	buf = malloc(buf_size);
+	if (buf == NULL) {
+		r = -ENOMEM;
+		goto exit;
+	}
+	while ((bytes = read(treefd, buf, buf_size)) > 0 ) {
+		r = write_bytes(fd, buf, bytes);
+		if (r != 0) {
+			pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
+			goto exit;
+		}
+	}
+	if (bytes < 0) {
+		r = -errno;
+		pr_err("failed reading tree [%d]: %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	/* write roothash */
+	r = pwrite_bytes(fd, container->root.offset, roothash, container->root.size);
+	if (r != 0) {
+		pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	/* write digest */
+	r = pwrite_bytes(fd, container->digest.offset, digest, container->digest.size);
+	if (r != 0) {
+		pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	/* write pubkey */
+	r = pwrite_bytes(fd, container->key.offset, pubkey, container->key.size);
+	if (r != 0) {
+		pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	/* write header */
+	r = write_bytes(fd, header, HEADER_SIZE);
+	if (r != 0) {
+		pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	r = 0;
+exit:
+	if (buf != NULL)
+		free(buf);
+	return r;
+}
+
+static int write_container(int fd, const char* path, EVP_PKEY* pkey, struct container* container)
+{
 	char tmppath[] = "/tmp/ctutil-XXXXXX";
-	int tmpfd = mkostemp(tmppath, O_CLOEXEC);
+	uint8_t *pubkey_buf = NULL;
+	uint8_t *digest = NULL;
+	char *hex = NULL;
+	int r = 0;
+	int tmpfd = -1;
+
+	/* fd size must be padded to multiples of 4096 */
+	r = padto_multiple_of(fd, 4096);
+	if (r != 0) {
+		pr_err("%s: failed padding: [%d]: %s\n", path, -r, strerror(-r));
+		goto exit;
+	}
+
+	/* create temp-file for hash tree output */
+	tmpfd = mkostemp(tmppath, O_CLOEXEC);
 	if (tmpfd < 0) {
 		r = -errno;
 		pr_err("mktmp: [%d] %s\n", -r, strerror(-r));
 		return r;
 	}
 
-	/* verity format */
+	/* verity create */
 	r = verity_create(path, tmppath, &container->roothash, &container->roothash_size);
 	if (r != 0)
 		goto exit;
+	const off64_t data_size = lseek64(fd, 0, SEEK_END);
+	if (data_size < 0) {
+		r = -errno;
+		pr_err("%s: failed getting data size [%d]: %s\n", -r, strerror(-r));
+		goto exit;
+	}
+	container->data.size = (size_t) data_size;
+	const off64_t tree_size = lseek64(tmpfd, 0, SEEK_END);
+	if (tree_size < 0) {
+		r = -errno;
+		pr_err("%s: failed getting tree size [%d]: %s\n", -r, strerror(-r));
+		goto exit;
+	}
+	container->tree.size = (size_t) tree_size;
+
+	/* Sign hex-encoded roothash */
+	size_t digest_size = 0;
+	hex = crypt_bytes_to_hex(container->roothash_size, (char*) container->roothash);
+	if (hex == NULL) {
+		r = -EFAULT;
+		goto exit;
+	}
+	container->root.size = strlen(hex);
+	r = create_digest((uint8_t*) hex, container->root.size, &digest, &digest_size, pkey);
+	if (r != 0)
+		goto exit;
+	container->digest.size = digest_size;
+
+	/* retrieve pubkey */
+	/* Ensure openssl errors are our errors */
+	ERR_clear_error();
+	const int pubkey_bytes = i2d_PUBKEY(pkey, (unsigned char**) &pubkey_buf);
+	if (pubkey_bytes < 0) {
+		pr_err("failed extracting pubkey\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -ENOSYS;
+		goto exit;
+	}
+	container->key.size = (size_t) pubkey_bytes;
+
+	/* create header */
+	uint8_t header_buf[HEADER_SIZE];
+	r = create_container_header(container, header_buf, HEADER_SIZE);
+	if (r != 0) {
+		pr_err("failed creating header: %[%d]: %s\n", -r, strerror(-r));
+		goto exit;
+	}
+
+	/* concatenate parts */
+	r = cat_container(container, fd, tmpfd, (uint8_t*) hex, digest, pubkey_buf, header_buf);
+	if (r != 0) {
+		pr_err("failed assembling container: %[%d]: %s\n", -r, strerror(-r));
+		goto exit;
+	}
 
 	r = 0;
 exit:
 	if (unlink(tmppath) != 0)
 		pr_info("failed removing tmpfile: %s\n", tmppath);
 	close(tmpfd);
+	if (digest != NULL)
+		free(digest);
+	if (pubkey_buf != NULL)
+		free(pubkey_buf);
+	if (hex != NULL)
+		crypt_safe_free(hex);
 	return r;
 }
 
@@ -1091,18 +1505,6 @@ int main(int argc, char *argv[])
 		return EINVAL;
 	}
 
-	EVP_PKEY *signing_key = NULL;
-	if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
-		if ((cfg.key_path == NULL) && (cfg.key_pkcs11 == NULL)) {
-			pr_err("Missing key --keyfile or --key-pkcs11 for --create\n");
-			return EINVAL;
-		}
-		if ((cfg.key_path != NULL) && (cfg.key_pkcs11 != NULL)) {
-			pr_err("--keyfile and --key-pkcs11 are mutually exclusive\n");
-			return EINVAL;
-		}
-	}
-
 	/* If pkcs11 provider is required then default provider must be explicitly
 	 * loaded as well.
 	 * Always load default provider and load pkcs11 if required. */
@@ -1127,11 +1529,31 @@ int main(int argc, char *argv[])
 	}
 
 	int r = 0;
+	int filefd = -1;
+
+	/* load private key if needed */
+	EVP_PKEY *signing_key = NULL;
+	if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
+		if ((cfg.key_path == NULL) && (cfg.key_pkcs11 == NULL)) {
+			r = -EINVAL;
+			pr_err("Missing key --keyfile or --key-pkcs11 for --create\n");
+			goto exit;
+		}
+		if ((cfg.key_path != NULL) && (cfg.key_pkcs11 != NULL)) {
+			r = -EINVAL;
+			pr_err("--keyfile and --key-pkcs11 are mutually exclusive\n");
+			goto exit;
+		}
+		r = read_private_key(cfg.key_path, cfg.key_pkcs11, &signing_key);
+		if (r != 0)
+			goto exit;
+	}
+
 	struct container container;
 	memset(&container, 0, sizeof(container));
 
 	/* open FILE and validate as container */
-	int filefd = open(cfg.filepath, O_RDONLY | O_CLOEXEC);
+	filefd = open(cfg.filepath, O_RDONLY | O_CLOEXEC);
 	if (filefd < 0) {
 		r = -errno;
 		pr_err("%s: [%d] %s\n", cfg.filepath, cfg.filepath, -r, strerror(-r));
@@ -1238,7 +1660,7 @@ int main(int argc, char *argv[])
 		}
 		/* add header */
 		destroy_container(&container);
-		r = write_container(filefd, cfg.filepath, cfg.key_path, cfg.key_pkcs11, &container);
+		r = write_container(filefd, cfg.filepath, signing_key, &container);
 		goto exit;
 	}
 
