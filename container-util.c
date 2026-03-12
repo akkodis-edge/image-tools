@@ -213,9 +213,32 @@ static void destroy_container(struct container* container)
 	memset(container, 0, sizeof(*container));
 }
 
-static void dump_header(const struct container* container)
+static void dump_container(const struct container* container)
 {
+	const char* key_type = EVP_PKEY_get0_type_name(container->pkey);
+	char *hex = crypt_bytes_to_hex(container->roothash_size, (char*) container->roothash);
 
+
+	printf("container:\n"
+			"  section   offset     size\n"
+			"  data:     %-10" PRIu64 " [%zu b]\n"
+			"  tree:     %-10" PRIu64 " [%zu b]\n"
+			"  root:     %-10" PRIu64 " [%zu b]\n"
+			"  pubkey:   %-10" PRIu64 " [%zu b]\n"
+			"  digest:   %-10" PRIu64 " [%zu b]\n"
+			"\n"
+			"  key type: %s-%d\n"
+			"  roothash: %s\n",
+				container->data.offset, container->data.size,
+				container->tree.offset, container->tree.size,
+				container->root.offset, container->root.size,
+				container->key.offset, container->key.size,
+				container->digest.offset, container->digest.size,
+				key_type ? key_type : "unknown", EVP_PKEY_get_bits(container->pkey),
+				hex);
+
+	if (hex != NULL)
+		crypt_safe_free(hex);
 }
 
 static void u32tole(uint32_t in, uint8_t* buf)
@@ -294,10 +317,12 @@ static int padto_multiple_of(int fd, off64_t multiple)
 	const off64_t size = lseek64(fd, 0, SEEK_END);
 	if (size < 0)
 		return -errno;
-	const ssize_t remaining = size < multiple ? multiple - size : size % multiple;
-	if (remaining == 0)
+	const off64_t modulus = -size % multiple;
+	pr_dbg("modulus %lld\n", modulus);
+	if (modulus == 0)
 		return 0;
-	pr_dbg("padding by %lld to %lld\n", remaining, size + remaining);
+	const ssize_t remaining = (ssize_t) multiple + modulus;
+	pr_dbg("padding from %lld by %lld to %lld\n", size, remaining, size + remaining);
 	uint8_t *buf = malloc(remaining);
 	if (buf == NULL)
 		return -ENOMEM;
@@ -739,16 +764,6 @@ static int create_container_header(struct container* container, uint8_t* buf, si
 	hdr.key_offset = container->key.offset;
 	hdr.digest_offset = container->digest.offset;
 
-	pr_dbg("header:\n"
-			"  data:   %-10" PRIu64 " [%zu b]\n"
-			"  tree:   %-10" PRIu64 " [%zu b]\n"
-			"  root:   %-10" PRIu64 " [%zu b]\n"
-			"  key:    %-10" PRIu64 " [%zu b]\n"
-			"  digest: %-10" PRIu64 " [%zu b]\n",
-				container->data.offset, container->data.size, container->tree.offset, container->tree.size,
-				container->root.offset, container->root.size, container->key.offset, container->key.size,
-				container->digest.offset, container->digest.size);
-
 	u32tole(hdr.magic, buf + offsetof(struct header, magic));
 	memcpy(buf + offsetof(struct header, rsvd), &hdr.rsvd, member_size(struct header, rsvd));
 	u64tole(hdr.tree_offset, buf + offsetof(struct header, tree_offset));
@@ -781,13 +796,20 @@ static int read_container_header(int fd, struct container* container)
 	struct header hdr;
 	memset(&hdr, 0, sizeof(hdr));
 	hdr.magic = u32fromle(buf + offsetof(struct header, magic));
-	if (hdr.magic != HEADER_MAGIC)
+	if (hdr.magic != HEADER_MAGIC) {
+		pr_dbg("hdr.magic 0x%" PRIx32 " not the expected 0x%" PRIx32 "\n", hdr.magic, HEADER_MAGIC)
 		return -ENOMSG; /* not of type container */
+	}
 	memcpy(&hdr.rsvd, buf + offsetof(struct header, rsvd), member_size(struct header, rsvd));
 	hdr.tree_offset = u64fromle(buf + offsetof(struct header, tree_offset));
 	hdr.root_offset = u64fromle(buf + offsetof(struct header, root_offset));
 	hdr.digest_offset = u64fromle(buf + offsetof(struct header, digest_offset));
 	hdr.key_offset = u64fromle(buf + offsetof(struct header, key_offset));
+
+	pr_dbg("hdr.tree_offset: 0x%" PRIx32 "\n", hdr.tree_offset);
+	pr_dbg("hdr.root_offset: 0x%" PRIx32 "\n", hdr.root_offset);
+	pr_dbg("hdr.digest_offset: 0x%" PRIx32 "\n", hdr.digest_offset);
+	pr_dbg("hdr.key_offset: 0x%" PRIx32 "\n", hdr.key_offset);
 
 	/* validate offsets, set size to 0 if invalid */
 	container->key.offset = hdr.key_offset;
@@ -800,16 +822,6 @@ static int read_container_header(int fd, struct container* container)
 	container->tree.size = container->root.offset > container->tree.offset ? container->root.offset - container->tree.offset : 0;
 	container->data.offset = 0;
 	container->data.size = container->tree.offset > container->data.offset ? container->tree.offset - container->data.offset : 0;
-
-	pr_dbg("header:\n"
-			"  data:   %-10" PRIu64 " [%zu b]\n"
-			"  tree:   %-10" PRIu64 " [%zu b]\n"
-			"  root:   %-10" PRIu64 " [%zu b]\n"
-			"  key:    %-10" PRIu64 " [%zu b]\n"
-			"  digest: %-10" PRIu64 " [%zu b]\n",
-				container->data.offset, container->data.size, container->tree.offset, container->tree.size,
-				container->root.offset, container->root.size, container->key.offset, container->key.size,
-				container->digest.offset, container->digest.size);
 
 	/* check if any offset is invalid */
 	if ((container->key.size == 0) | (container->digest.size == 0) | (container->root.size == 0)
@@ -1352,6 +1364,15 @@ static int write_container(int fd, const char* path, EVP_PKEY* pkey, struct cont
 		goto exit;
 	}
 
+	/* add signing key to container if needed */
+	r = EVP_PKEY_up_ref(pkey);
+	if (r != 1) {
+		r = -EFAULT;
+		pr_err("failed increment private key ref count\n");
+		goto exit;
+	}
+	container->pkey = pkey;
+
 	r = 0;
 exit:
 	if (unlink(tmppath) != 0)
@@ -1644,6 +1665,8 @@ int main(int argc, char *argv[])
 		r = verity_open(cfg.filepath, NULL, CRYPT_VERITY_CHECK_HASH, &container);
 		if (r < 0)
 			goto exit;
+		if (info)
+			dump_container(&container);
 		pr_info("container - verified\n");
 		goto exit;
 	}
@@ -1714,6 +1737,9 @@ int main(int argc, char *argv[])
 		/* add header */
 		destroy_container(&container);
 		r = write_container(filefd, cfg.filepath, signing_key, &container);
+		if (info)
+			dump_container(&container);
+		pr_info("container - created\n");
 		goto exit;
 	}
 
