@@ -18,6 +18,7 @@
 #include <openssl/pem.h>
 #include <openssl/provider.h>
 #include <openssl/store.h>
+#include <openssl/ui.h>
 #include <libcryptsetup.h>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
@@ -29,13 +30,9 @@
 // FIXME:  Test --pubkey with DER
 // FIXME:  Test --pubkey with mixed PEM object types (!= PUBLIC KEY)
 // FIXME:  Test --pubkey-dir
-// FIXME:  Add --dump to print header details incl. signing key type (and hash..?)
-// FIXME:  Select hash based on key type
 // FIXME:  runtime dependency packages: pkcs11-provider
-// FIXME:  Do file-based public keys need to be validated? EVP_PKEY_public_check() ?
 // FIXME:  Test RSA and ECDSA priv/pub keys
 // FIXME:  Select hashing (i.e. sha256) based on key type
-// FIXME:  test input file not multiple of 4096
 /*
  * Following functions are copied from cryptsetup/lib/utils_crypt.c
  *   hex_to_bin()
@@ -140,9 +137,11 @@ char *crypt_bytes_to_hex(size_t size, const char *bytes)
 /* Get sizeof() struct member */
 #define member_size(type, member) (sizeof(((type *)0)->member))
 
-/*
- *
- */
+/* check bit-flag */
+static inline int is_set(int flag, int mask)
+{
+	return (flag & mask) == mask;
+}
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static int dbg = 0;
@@ -374,130 +373,6 @@ static int parse_private_key(const uint8_t* data, long size, EVP_PKEY** pkey)
 	return 0;
 }
 
-static int read_private_key_file(const char* key_path, EVP_PKEY** pkey)
-{
-	int r = 0;
-	/* Open as stream for PEM_read() compatibility */
-	FILE *file = fopen(key_path, "r");
-	if (file == NULL) {
-		r = -errno;
-		pr_err("%s: fdopen [%d] %s\n", key_path, -r, strerror(-r));
-		return r;
-	}
-
-	uint8_t *data = NULL;
-	char *name = NULL;
-	char *header = NULL;
-	long len = 0;
-
-	/* Check first if key is DER formatted
-	 * by reading in 1MB to pre-allocated
-	 * buffers mimicking PEM_read() usage. */
-	const size_t der_buf_size = 1 * 1024 * 1024;
-	r = -ENOMEM;
-	data = OPENSSL_malloc(der_buf_size);
-	if (data == NULL)
-		goto exit;
-	name = OPENSSL_strdup("PRIVATE KEY");
-	if (name == NULL)
-		goto exit;
-	len = fread(data, 1, der_buf_size, file);
-
-	/* rewind file for PEM parsing if DER fails */
-	rewind(file);
-
-	/* Run once for DER and second time for PEM, PEM stack not supported */
-	for (int i = 0; i < 2; ++i) {
-		pr_dbg("%s: %s checking\n", key_path, i == 0 ? "DER0" : "PEM0");
-		if (strcmp(name, "PRIVATE KEY") == 0)
-			r = parse_private_key(data, len, pkey);
-		OPENSSL_free(name);
-		name = NULL;
-		OPENSSL_free(header);
-		header = NULL;
-		OPENSSL_free(data);
-		data = NULL;
-		if (r != 0)
-			pr_dbg("%s: [%d] %s\n", key_path, -r, strerror(-r));
-		if (r == 0)
-			goto exit;
-		if (PEM_read(file, &name, &header, &data, &len) != 1)
-			break;
-	}
-
-	r = -EBADF;
-exit:
-	OPENSSL_free(data);
-	OPENSSL_free(name);
-	OPENSSL_free(header);
-	fclose(file);
-	return r;
-}
-
-static int read_private_key_pkcs11(const char* key_pkcs11, EVP_PKEY** pkey)
-{
-	/* Ensure openssl errors are our errors */
-	ERR_clear_error();
-
-	OSSL_STORE_CTX *store = OSSL_STORE_open(key_pkcs11, NULL, NULL, NULL, NULL);
-	if (store == NULL) {
-		pr_err("pkcs11 OSSL_STORE_open failed\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		return -EFAULT;
-	}
-
-	/* Notify store we are looking for public key */
-	int r = OSSL_STORE_expect(store, OSSL_STORE_INFO_PKEY);
-	if (r != 1) {
-		pr_err("pkcs11 OSSL_STORE_expect failed\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		return -EFAULT;
-	}
-
-	/* Search for key in store */
-	OSSL_STORE_INFO *info = NULL;
-	r = 0;
-	while((info = OSSL_STORE_load(store)) != NULL) {
-		EVP_PKEY* key = OSSL_STORE_INFO_get0_PKEY(info);
-		if (key != NULL)
-			r = EVP_PKEY_up_ref(key);
-		OSSL_STORE_INFO_free(info);
-		info = NULL;
-		if (key == NULL)
-			continue;
-		if (r != 1) {
-			pr_err("pkcs11 failed retrieving key\n");
-			return -EFAULT;
-		}
-		*pkey = key;
-		return 0;
-	}
-
-	/* OSSL_STORE_close(store);
-	* will cause a segmentation fault on OSSL_PROVIDER_unload(pkcs11_provider).
-	* Is this close method redundant? */
-
-	return -ENOENT;
-}
-
-static int read_private_key(const char* key_path, const char* key_pkcs11, EVP_PKEY** pkey)
-{
-	int r = -EINVAL;
-
-	if (key_path != NULL) {
-		r = read_private_key_file(key_path, pkey);
-		if (r == 0)
-			return r;
-	}
-	if (key_pkcs11 != NULL) {
-		r = read_private_key_pkcs11(key_pkcs11, pkey);
-		if (r == 0)
-			return r;
-	}
-
-	return r;
-}
-
 static int parse_public_key(const uint8_t* data, long size, EVP_PKEY** pkey)
 {
 	const unsigned char *tmp = data;
@@ -512,13 +387,12 @@ static int parse_public_key(const uint8_t* data, long size, EVP_PKEY** pkey)
  *        0 if not equal
  *        negative errno for error
  */
-static int compare_public_key(const EVP_PKEY* to_compare, const EVP_PKEY* pkey)
+static int compare_pkey(const EVP_PKEY* lhs, const EVP_PKEY* rhs)
 {
-	pr_dbg("key type: %s\n", EVP_PKEY_get0_type_name(to_compare));
 	int r = 0;
 
 	/* compare keys */
-	switch (EVP_PKEY_eq(pkey, to_compare)) {
+	switch (EVP_PKEY_eq(lhs, rhs)) {
 	case 0:
 		r = 0;
 		break;
@@ -538,194 +412,317 @@ static int compare_public_key(const EVP_PKEY* to_compare, const EVP_PKEY* pkey)
 	return r;
 }
 
-/*
- * return 1 if equal
- *        0 if not equal
- *        negative errno for error
- */
-static int compare_public_key_der(const uint8_t* der, long size, const EVP_PKEY* pkey)
+enum read_pkey_ctx_operations {
+	READ_PKEY_FORMAT_DER     = 1 << 0,
+	READ_PKEY_FORMAT_PEM     = 1 << 1,
+	READ_PKEY_FORMAT_STACK   = 1 << 2,
+	READ_PKEY_FORMAT_PKCS11  = 1 << 3,
+	READ_PKEY_TYPE_PRIV      = 1 << 4,
+	READ_PKEY_TYPE_PUB       = 1 << 5,
+};
+
+struct read_pkey_ctx {
+	char *path;
+	char *pkcs11;
+	FILE *file;
+	OSSL_STORE_CTX *store;
+	int ops;
+	int done;
+	size_t pem_index;
+};
+
+static int read_pkey_ctx_create(struct read_pkey_ctx* ctx, const char* path, const char* pkcs11, int ops)
 {
-	/* parse key */
-	EVP_PKEY *to_compare = NULL;
-	int r = parse_public_key(der, size, &to_compare);
-	if (r != 0)
-		return r;
+	memset(ctx, 0, sizeof(*ctx));
 
-	/* compare keys */
-	r = compare_public_key(to_compare, pkey);
-	EVP_PKEY_free(to_compare);
-	return r;
-}
+	if (path == NULL && (is_set(ops, READ_PKEY_FORMAT_DER) || is_set(ops, READ_PKEY_FORMAT_PEM)))
+		return -EINVAL;
+	if (pkcs11 == NULL && is_set(ops, READ_PKEY_FORMAT_PKCS11))
+		return -EINVAL;
+	/* Must search for something */
+	if ((ops & (READ_PKEY_TYPE_PRIV | READ_PKEY_TYPE_PUB)) == 0)
+			return -EINVAL;
+	/* Can't search for both priv and pubkeys simultaneously from pkcs11 */
+	if (is_set(ops, READ_PKEY_FORMAT_PKCS11)
+			&& is_set(ops, READ_PKEY_TYPE_PRIV)
+			&& is_set(ops, READ_PKEY_TYPE_PUB))
+		return -EINVAL;
 
-static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
-{
-	int r = 0;
-	/* Open as stream for PEM_read() compatibility */
-	FILE *file = fopen(path, "r");
-	if (file == NULL) {
-		r = -errno;
-		pr_err("%s: fdopen [%d] %s\n", path, -r, strerror(-r));
-		return r;
-	}
-
-	uint8_t *data = NULL;
-	char *name = NULL;
-	char *header = NULL;
-	long len = 0;
-
-	/* Check first if pubkey is DER formatted
-	 * by reading in 1MB to pre-allocated
-	 * buffers mimicking PEM_read() usage. */
-	const size_t der_buf_size = 1 * 1024 * 1024;
-	r = -ENOMEM;
-	data = OPENSSL_malloc(der_buf_size);
-	if (data == NULL)
-		goto exit;
-	name = OPENSSL_strdup("PUBLIC KEY");
-	if (name == NULL)
-		goto exit;
-	len = fread(data, 1, der_buf_size, file);
-
-	/* rewind file for PEM parsing if DER fails */
-	rewind(file);
-
-	/* Keep track of DER/PEM and PEM count for improved
-	 * debug messages */
-	int is_PEM = 0;
-	int PEM_count = -1;
-
-	do {
-		r = 0;
-
-		pr_dbg("%s: %s%d checking\n", path, is_PEM ? "PEM" : "DER", is_PEM ? PEM_count : 0);
-
-		if (strcmp(name, "PUBLIC KEY") == 0)
-			r = compare_public_key_der(data, len, pkey);
-
-		OPENSSL_free(name);
-		name = NULL;
-		OPENSSL_free(header);
-		header = NULL;
-		OPENSSL_free(data);
-		data = NULL;
-
-		if (r == 1) {
-			pr_info("%s: pubkey used for validation\n", path);
-			goto exit;
-		}
-
-		is_PEM = 1;
-		PEM_count++;
-
-	/* Check for PEM, single or stack */
-	} while (PEM_read(file, &name, &header, &data, &len) == 1);
-
-	r = 0;
-exit:
-	OPENSSL_free(data);
-	OPENSSL_free(name);
-	OPENSSL_free(header);
-	fclose(file);
-	return r;
-}
-
-static int read_and_compare_public_dir(const char* pubkey_dir, const EVP_PKEY* pkey)
-{
-	int r = 0;
-	DIR *dir = opendir(pubkey_dir);
-	if (dir == NULL) {
-		r = -errno;
-		pr_dbg("%s: failed opendir: [%d] %s\n", pubkey_dir, -r, strerror(-r));
-		return r;
-	}
-
-	struct dirent *entry = NULL;
-	while ((entry = readdir(dir)) != NULL) {
-		char *path = NULL;
-		r = asprintf(&path, "%s/%s", pubkey_dir, entry->d_name);
-		if (r < 0) {
-			r = -errno;
-			pr_err("%s: failed asprintf: [%d]: %s\n", pubkey_dir, -r, strerror(-r));
-			goto exit;
-		}
-		/* Attemtp comparison if path is regular file */
-		struct stat st;
-		memset(&st, 0, sizeof(st));
-		r = 0;
-		if (stat(path, &st) == 0) {
-			if (S_ISREG(st.st_mode))
-				r = read_and_compare_public_key(path, pkey);
-		}
-		else {
-			pr_dbg("%s: failed stat: [%d]: %s\n", path, errno, strerror(errno));
-		}
-		free(path);
-
-		if (r == 1)
-			goto exit;
-	}
-	r = -errno; /* errno will be 0 on end of stream, else error */
-	if (r != 0)
-		pr_dbg("%s: failed readdir: [%d]: %s\n", pubkey_dir, -r, strerror(-r));
-
-exit:
-	closedir(dir);
-	return r;
-}
-
-static int read_and_compare_public_pkcs11(const char* pubkey_pkcs11, const EVP_PKEY* pkey)
-{
-	/* Ensure openssl errors are our errors */
-	ERR_clear_error();
-
-	OSSL_STORE_CTX *store = OSSL_STORE_open(pubkey_pkcs11, NULL, NULL, NULL, NULL);
-	if (store == NULL) {
-		pr_err("pkcs11 OSSL_STORE_open failed\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		return -EFAULT;
-	}
-
-	/* Notify store we are looking for public key */
-	int r = OSSL_STORE_expect(store, OSSL_STORE_INFO_PUBKEY);
-	if (r != 1) {
-		pr_err("pkcs11 OSSL_STORE_expect failed\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		return -EFAULT;
-	}
-
-	/* Search for pubkey in store */
-	OSSL_STORE_INFO *info = NULL;
-	while((info = OSSL_STORE_load(store)) != NULL) {
-		EVP_PKEY* to_compare = OSSL_STORE_INFO_get0_PUBKEY(info);
-		r = to_compare != NULL ? compare_public_key(to_compare, pkey) : 0;
-		OSSL_STORE_INFO_free(info);
-		info = NULL;
-		if (r == 1)
+	if (path != NULL) {
+		ctx->path = (char*) path;
+		ctx->file = fopen(path, "r");
+		if (ctx->file == NULL) {
+			int r = -errno;
+			pr_err("%s: fdopen [%d] %s\n", path, -r, strerror(-r));
 			return r;
+		}
+	}
+	if (pkcs11 != NULL) {
+		ctx->pkcs11 = (char*) pkcs11;
+		/* Ensure openssl errors are our errors */
+		ERR_clear_error();
+
+		ctx->store = OSSL_STORE_open(pkcs11, UI_null(), NULL, NULL, NULL);
+		if (ctx->store == NULL) {
+			if (path != NULL) {
+				fclose(ctx->file);
+				ctx->file = NULL;
+			}
+			pr_err("pkcs11 OSSL_STORE_open failed\n");
+			ERR_print_errors_cb(error_cb, NULL);
+			return -EFAULT;
+		}
+
+		/* Notify store what we are looking for, required to avoid
+		 * requiring pin for pubkeys.
+		 * This operation must be called before first
+		 * OSSL_STORE_load() call. */
+		int expected = 0;
+		if (is_set(ops, READ_PKEY_TYPE_PUB))
+			expected = OSSL_STORE_INFO_PUBKEY;
+		if (is_set(ops, READ_PKEY_TYPE_PRIV))
+			expected = OSSL_STORE_INFO_PKEY;
+		int r = OSSL_STORE_expect(ctx->store, expected);
+		if (r != 1) {
+			if (path != NULL) {
+				fclose(ctx->file);
+				ctx->file = NULL;
+			}
+			pr_err("pkcs11 OSSL_STORE_expect failed\n");
+			ERR_print_errors_cb(error_cb, NULL);
+			return -EFAULT;
+		}
 	}
 
-	/* OSSL_STORE_close(store);
+	ctx->ops = ops;
+	ctx->done = 0;
+	ctx->pem_index = 0;
+	return 0;
+}
+
+static int read_pkey_ctx_free(struct read_pkey_ctx* ctx)
+{
+	if (ctx == NULL)
+		return 0;
+	if (ctx->file != NULL)
+		fclose(ctx->file);
+	ctx->file = NULL;
+
+	/* OSSL_STORE_close(ctx->store);
 	* will cause a segmentation fault on OSSL_PROVIDER_unload(pkcs11_provider).
 	* Is this close method redundant? */
 
 	return 0;
 }
 
+/* Return PKEY from ctx, caller responsible of freeing pkey.
+ * path should NOT be freed.
+ *
+ * Return 0 if key available, 1 if no further processing possible
+ * or negative errno for error. */
+static int read_pkey(struct read_pkey_ctx* ctx, EVP_PKEY** pkey, char** path)
+{
+	if ((ctx == NULL) || (pkey == NULL) || (*pkey != NULL))
+		return -EINVAL;
+
+	int r = 0;
+
+	/* Read PEM if requested */
+	if (is_set(ctx->ops, READ_PKEY_FORMAT_PEM) && !is_set(ctx->done, READ_PKEY_FORMAT_PEM)) {
+		for (; ctx->pem_index < SIZE_MAX; ++ctx->pem_index) {
+
+			/* Next PEM call not allowed unless READ_PKEY_FORMAT_STACK is set */
+			if (!is_set(ctx->ops, READ_PKEY_FORMAT_STACK))
+				ctx->done |= READ_PKEY_FORMAT_PEM;
+
+			/* read PEM */
+			uint8_t *data = NULL;
+			char *name = NULL;
+			char *header = NULL;
+			long len = 0;
+			if (PEM_read(ctx->file, &name, &header, &data, &len) != 1) {
+				/* no further PEM available */
+				ctx->done |= READ_PKEY_FORMAT_PEM;
+				break;
+			}
+
+			/* parse by PEM name*/
+			r = -EPROTOTYPE;
+			if (r != 0 && is_set(ctx->ops, READ_PKEY_TYPE_PUB) && (strcmp(name, "PUBLIC KEY") == 0))
+				r = parse_public_key(data, len, pkey);
+			if (r != 0 && is_set(ctx->ops, READ_PKEY_TYPE_PRIV) && (strcmp(name, "PRIVATE KEY") == 0))
+				r = parse_private_key(data, len, pkey);
+			if (r == 0) {
+				pr_dbg("%s[PEM%zu][%s]: %s-%d\n", ctx->path, ctx->pem_index, name, EVP_PKEY_get0_type_name(*pkey), EVP_PKEY_get_bits(*pkey));
+			}
+			else {
+				pr_dbg("%s[PEM%zu][%s]: [%d] %s\n", ctx->path, ctx->pem_index, name, -r, strerror(-r));
+			}
+			OPENSSL_free(name);
+			OPENSSL_free(header);
+			OPENSSL_free(data);
+			if (r == 0) {
+				*path = ctx->path;
+				return 0;
+			}
+		}
+	}
+
+	/* Read DER if requested */
+	if (is_set(ctx->ops, READ_PKEY_FORMAT_DER) && !is_set(ctx->done, READ_PKEY_FORMAT_DER)) {
+
+		/* No further DER processing  after this */
+		ctx->done |= READ_PKEY_FORMAT_DER;
+
+		/* rewind file in case it has been used for PEM parsing */
+		rewind(ctx->file);
+
+		/* read in up to 1mb from file */
+		const size_t der_buf_size = 1 * 1024 * 1024;
+		uint8_t *der_buf = malloc(der_buf_size);
+		if (der_buf == NULL)
+			return -ENOMEM;
+		const long len = fread(der_buf, 1, der_buf_size, ctx->file);
+
+		/* check for type by trying parsing */
+		r = -EPROTOTYPE;
+		if (r != 0 && is_set(ctx->ops, READ_PKEY_TYPE_PUB))
+			r = parse_public_key(der_buf, len, pkey);
+		if (r != 0 && is_set(ctx->ops, READ_PKEY_TYPE_PRIV))
+			r = parse_private_key(der_buf, len, pkey);
+		free(der_buf);
+		if (r == 0) {
+			*path = ctx->path;
+			pr_dbg("%s[DER0]: %s-%d\n", ctx->path, EVP_PKEY_get0_type_name(*pkey), EVP_PKEY_get_bits(*pkey));
+			return 0;
+		}
+		pr_dbg("%s[DER0]: [%d] %s\n", ctx->path, -r, strerror(-r));
+	}
+
+	/* READ pkcs11 if requested */
+	if (is_set(ctx->ops, READ_PKEY_FORMAT_PKCS11) && !is_set(ctx->done, READ_PKEY_FORMAT_PKCS11)) {
+		/* Search for key in store */
+		OSSL_STORE_INFO *info = NULL;
+		while ((info = OSSL_STORE_load(ctx->store)) != NULL) {
+			EVP_PKEY* key = NULL;
+			if (key == NULL && is_set(ctx->ops, READ_PKEY_TYPE_PUB))
+				key = OSSL_STORE_INFO_get0_PUBKEY(info);
+			if (key == NULL && is_set(ctx->ops, READ_PKEY_TYPE_PRIV))
+				key = OSSL_STORE_INFO_get0_PKEY(info);
+			if (key != NULL)
+				r = EVP_PKEY_up_ref(key);
+			OSSL_STORE_INFO_free(info);
+			if (key == NULL)
+				continue;
+			if (r != 1) {
+				pr_err("pkcs11 failed retrieving key\n");
+				EVP_PKEY_free(key);
+				return -EFAULT;
+			}
+			*pkey = key;
+			*path = "pkcs11";
+			pr_dbg("pkcs11: %s-%d\n", EVP_PKEY_get0_type_name(*pkey), EVP_PKEY_get_bits(*pkey));
+			return 0;
+		}
+
+		/* pkcs11 store empty */
+		ctx->done |= READ_PKEY_FORMAT_PKCS11;
+	}
+
+	return 1;
+}
+
+static int read_private_key(const char* key_path, const char* key_pkcs11, EVP_PKEY** pkey)
+{
+	int flags = READ_PKEY_TYPE_PRIV;
+	if (key_path != NULL)
+		flags |= READ_PKEY_FORMAT_DER | READ_PKEY_FORMAT_PEM;
+	if (key_pkcs11 != NULL)
+		flags |= READ_PKEY_FORMAT_PKCS11;
+
+	struct read_pkey_ctx ctx;
+	int r = read_pkey_ctx_create(&ctx, key_path, key_pkcs11, flags);
+	if (r != 0)
+		return r;
+
+	char *name = NULL;
+	r = read_pkey(&ctx, pkey, &name);
+	read_pkey_ctx_free(&ctx);
+	if (r > 0)
+		r = -EBADF;
+	return r;
+}
+
+static int read_and_match_public_key(const char* key_path, const char* key_pkcs11, const EVP_PKEY* pkey)
+{
+	int flags = READ_PKEY_TYPE_PUB;
+	if (key_path != NULL)
+		flags |= READ_PKEY_FORMAT_DER | READ_PKEY_FORMAT_PEM | READ_PKEY_FORMAT_STACK;
+	if (key_pkcs11 != NULL)
+		flags |= READ_PKEY_FORMAT_PKCS11;
+
+	struct read_pkey_ctx ctx;
+	int r = read_pkey_ctx_create(&ctx, key_path, key_pkcs11, flags);
+	if (r != 0)
+		return r;
+
+	EVP_PKEY *compare = NULL;
+	char *name = NULL;
+	while ((r = read_pkey(&ctx, &compare, &name)) == 0) {
+		const int result = compare_pkey(compare, pkey);
+		EVP_PKEY_free(compare);
+		if (result == 1) {
+			r = 1;
+			pr_info("%s: pubkey used for validation\n", name);
+			goto exit;
+		}
+	}
+	if (r > 0)
+		r = 0;
+exit:
+	read_pkey_ctx_free(&ctx);
+	return r;
+}
+
 static int match_pubkey(const char* pubkey, const char* pubkey_dir, const char* pubkey_pkcs11, const EVP_PKEY* pkey)
 {
-	if (pubkey) {
-		pr_dbg("match container pubkey to --pubkey\n");
-		if (read_and_compare_public_key(pubkey, pkey) == 1)
+	if ((pubkey != NULL) || pubkey_pkcs11 != NULL) {
+		if (read_and_match_public_key(pubkey, pubkey_pkcs11, pkey) == 1)
 			return 0;
 	}
-	if (pubkey_dir) {
-		pr_dbg("match container pubkey to --pubkey-dir\n");
-		if (read_and_compare_public_dir(pubkey_dir, pkey) == 1)
-			return 0;
-	}
-	if (pubkey_pkcs11) {
-		pr_dbg("match container pubkey to --pubkey-pkcs11\n");
-		if (read_and_compare_public_pkcs11(pubkey_pkcs11, pkey) == 1)
+
+	if (pubkey_dir != NULL) {
+		int r = 0;
+		DIR *dir = opendir(pubkey_dir);
+		if (dir == NULL) {
+			r = -errno;
+			pr_dbg("%s: failed opendir: [%d] %s\n", pubkey_dir, -r, strerror(-r));
+			return r;
+		}
+
+		struct dirent *entry = NULL;
+		r = -EBADF;
+		while ((entry = readdir(dir)) != NULL) {
+			char *path = NULL;
+			int r = asprintf(&path, "%s/%s", pubkey_dir, entry->d_name);
+			if (r < 0) {
+				r = -errno;
+				pr_err("%s: failed asprintf: [%d]: %s\n", pubkey_dir, -r, strerror(-r));
+				break;
+			}
+
+			/* Attempt comparison if path is regular file */
+			struct stat st;
+			memset(&st, 0, sizeof(st));
+			r = -EBADF;
+			if ((stat(path, &st) == 0) && S_ISREG(st.st_mode))
+				r = read_and_match_public_key(path, NULL, pkey);
+			free(path);
+			if (r == 1)
+				break;
+		}
+		closedir(dir);
+		if (r == 1)
 			return 0;
 	}
 
@@ -835,8 +832,8 @@ static int read_container_header(int fd, struct container* container)
 	container->data.size = container->tree.offset > container->data.offset ? container->tree.offset - container->data.offset : 0;
 
 	/* check if any offset is invalid */
-	if ((container->key.size == 0) | (container->digest.size == 0) | (container->root.size == 0)
-		| (container->tree.size == 0) | (container->data.size == 0) | (container->header.size == 0)) {
+	if ((container->key.size == 0) || (container->digest.size == 0) || (container->root.size == 0)
+		|| (container->tree.size == 0) || (container->data.size == 0) || (container->header.size == 0)) {
 		pr_dbg("container - insane header offsets\n")
 		return -ENOMSG; /* not of type container */
 	}
@@ -1463,7 +1460,6 @@ struct config {
 	char *pubkey_path;
 	char *pubkey_pkcs11;
 	char *pubkey_dir;
-
 };
 
 //NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1606,31 +1602,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	int r = 0;
-	int filefd = -1;
-
-	/* load private key if needed */
-	EVP_PKEY *signing_key = NULL;
-	if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
-		if ((cfg.key_path == NULL) && (cfg.key_pkcs11 == NULL)) {
-			r = -EINVAL;
-			pr_err("Missing key --keyfile or --key-pkcs11 for --create\n");
-			goto exit;
-		}
-		if ((cfg.key_path != NULL) && (cfg.key_pkcs11 != NULL)) {
-			r = -EINVAL;
-			pr_err("--keyfile and --key-pkcs11 are mutually exclusive\n");
-			goto exit;
-		}
-		r = read_private_key(cfg.key_path, cfg.key_pkcs11, &signing_key);
-		if (r != 0) {
-			pr_err("Could not read private key: [%d]: %s\n", -r, strerror(-r));
-			goto exit;
-		}
-	}
-
 	struct container container;
 	memset(&container, 0, sizeof(container));
+	EVP_PKEY *signing_key = NULL;
+	int r = 0;
+	int filefd = -1;
 
 	/* open FILE and validate as container */
 	filefd = open(cfg.filepath, O_RDONLY | O_CLOEXEC);
@@ -1677,6 +1653,21 @@ int main(int argc, char *argv[])
 		goto exit;
 	}
 
+	/* open as devicemapper block device */
+	if ((cfg.opt & OPT_OPEN) == OPT_OPEN) {
+		if ((container.opt & CONTAINER_VALID) != CONTAINER_VALID) {
+			pr_err("container - not a container\n");
+			r = -EBADF;
+			goto exit;
+		}
+		r = verity_open(cfg.filepath, cfg.mapperpath, 0, &container);
+		if (r != 0)
+			goto exit;
+
+		/* on success the roothash should be printed */
+		cfg.opt = OPT_ROOTHASH;
+	}
+
 	/* dump roothash */
 	if ((cfg.opt & OPT_ROOTHASH) == OPT_ROOTHASH) {
 		if ((container.opt & CONTAINER_VALID) != CONTAINER_VALID) {
@@ -1695,19 +1686,6 @@ int main(int argc, char *argv[])
 		goto exit;
 	}
 
-	/* open as devicemapper block device */
-	if ((cfg.opt & OPT_OPEN) == OPT_OPEN) {
-		if ((container.opt & CONTAINER_VALID) != CONTAINER_VALID) {
-			pr_err("container - not a container\n");
-			r = -EBADF;
-			goto exit;
-		}
-		r = verity_open(cfg.filepath, cfg.mapperpath, 0, &container);
-		if (r == 0)
-			pr_info("container - opened\n");
-		goto exit;
-	}
-
 	/* create new header */
 	if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
 		if (((container.opt & CONTAINER_VALID) == CONTAINER_VALID)
@@ -1715,6 +1693,25 @@ int main(int argc, char *argv[])
 			pr_err("FILE is valid container, use --force to overwrite\n");
 			r = -EBADF;
 			goto exit;
+		}
+
+		/* load private key */
+		if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
+			if ((cfg.key_path == NULL) && (cfg.key_pkcs11 == NULL)) {
+				r = -EINVAL;
+				pr_err("Missing key --keyfile or --key-pkcs11 for --create\n");
+				goto exit;
+			}
+			if ((cfg.key_path != NULL) && (cfg.key_pkcs11 != NULL)) {
+				r = -EINVAL;
+				pr_err("--keyfile and --key-pkcs11 are mutually exclusive\n");
+				goto exit;
+			}
+			r = read_private_key(cfg.key_path, cfg.key_pkcs11, &signing_key);
+			if (r != 0) {
+				pr_err("Could not read private key: [%d]: %s\n", -r, strerror(-r));
+				goto exit;
+			}
 		}
 
 		/* reopen for writing */
