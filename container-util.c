@@ -841,30 +841,6 @@ static int read_container_header(int fd, struct container* container)
 	return 0;
 }
 
-static int read_container_public_key(int fd, const struct section* section, EVP_PKEY** pkey)
-{
-	if (section->size > LONG_MAX) /* d2i_PUBKEY() length argument is type long */
-		return -EINVAL;
-
-	/* Read to buffer */
-	uint8_t *buf = malloc(section->size);
-	if (buf == NULL)
-		return -ENOMEM;
-	int r = pread_bytes(fd, section->offset, buf, section->size);
-	if (r != 0)
-		goto exit;
-
-	/* parse key */
-	r = parse_public_key(buf, section->size, pkey);
-	if (r != 0)
-		goto exit;
-
-	r = 0;
-exit:
-	free(buf);
-	return r;
-}
-
 static int create_digest(const uint8_t* data, size_t data_size, uint8_t** digest, size_t* digest_size, EVP_PKEY* pkey)
 {
 	uint8_t *digest_buf = NULL;
@@ -950,25 +926,15 @@ exit:
 }
 
 /* Return 1 for valid, 0 for invalid, else negative errno for error */
-static int verify_container_digest(int fd, const uint8_t* data_buf, size_t data_size, const struct section* digest, EVP_PKEY* pkey)
+static int verify_digest(const uint8_t* data_buf, size_t data_size, uint8_t* digest_buf, size_t digest_size, EVP_PKEY* pkey)
 {
-	uint8_t *digest_buf = NULL;
 	EVP_MD_CTX *ctx = NULL;
 	EVP_MD *algo = NULL;
 
-	/* allocate */
-	int r = -ENOMEM;
-	digest_buf = malloc(digest->size);
-	if (digest_buf == NULL)
-		goto exit;
-
-	/* read */
-	r = pread_bytes(fd, digest->offset, digest_buf, digest->size);
-	if (r != 0)
-		goto exit;
-
 	/* Ensure openssl errors are our errors */
 	ERR_clear_error();
+
+	int r = 0;
 
 	/* prepare validation context */
 	ctx = EVP_MD_CTX_new();
@@ -997,7 +963,7 @@ static int verify_container_digest(int fd, const uint8_t* data_buf, size_t data_
 	}
 
 	/* verify */
-	r = EVP_DigestVerify(ctx, digest_buf, digest->size, data_buf, data_size);
+	r = EVP_DigestVerify(ctx, digest_buf, digest_size, data_buf, data_size);
 	if (r != 0 && r != 1) {
 		pr_dbg("failed verifying digest\n");
 		ERR_print_errors_cb(error_cb, NULL);
@@ -1005,12 +971,17 @@ static int verify_container_digest(int fd, const uint8_t* data_buf, size_t data_
 	}
 
 exit:
-	if (digest_buf != NULL)
-		free(digest_buf);
 	EVP_MD_CTX_free(ctx);
 	EVP_MD_free(algo);
 	return r;
 }
+
+struct region {
+	off64_t offset;
+	size_t size;
+	size_t extra;
+	uint8_t **data;
+};
 
 static int read_container(struct container* container, int fd)
 {
@@ -1028,28 +999,42 @@ static int read_container(struct container* container, int fd)
 		return r;
 	}
 
-	char *roothash = NULL;
+	if (container->key.size > LONG_MAX) /* d2i_PUBKEY() length argument is type long */
+		return -ENOMSG; /* not a container */
 
-	/* read public key */
-	r = read_container_public_key(fd, &container->key, &container->pkey);
+	char *roothash = NULL;
+	uint8_t *digest = NULL;
+	uint8_t *pubkey = NULL;
+
+	/* allocate and read metadata */
+	const struct region regions[] = {
+			{container->key.offset, container->key.size, 0, &pubkey},
+			{container->digest.offset, container->digest.size, 0, &digest},
+			/** allocate an extra byte for null-terminator, calloc ensure '\0' at end */
+			{container->root.offset, container->root.size, 1, (uint8_t**) &roothash},
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(regions); ++i) {
+		*(regions[i].data) = calloc(1, regions[i].size + regions[i].extra);
+		if (*(regions[i].data) == NULL) {
+			r = -ENOMEM;
+			goto exit;
+		}
+		r = pread_bytes(fd, regions[i].offset, *(regions[i].data), regions[i].size);
+		if (r != 0) {
+			pr_err("failed reading from FILE: [%d] %s\n", -r, strerror(-r));
+			goto exit;
+		}
+	}
+
+	/* parse pubkey */
+	r = parse_public_key(pubkey, container->key.size, &container->pkey);
 	if (r != 0) {
 		pr_dbg("container - pubkey: [%d]: %s\n", -r, strerror(-r));
 		goto exit;
 	}
 
-	/* read roothash, allocate an extra byte for null-terminator
-	 * for crypt_hex_to_bytes() */
-	roothash = calloc(1, container->root.size + 1);
-	if (roothash == NULL) {
-		r = -ENOMEM;
-		goto exit;
-	}
-	r = pread_bytes(fd, container->root.offset, (uint8_t*) roothash, container->root.size);
-	if (r != 0)
-		goto exit;
-
-	/* validate roothash */
-	r = verify_container_digest(fd, (uint8_t*) roothash, container->root.size, &container->digest, container->pkey);
+	/* validate roothash signature */
+	r = verify_digest((uint8_t*) roothash, container->root.size, (uint8_t*) digest, container->digest.size, container->pkey);
 	switch (r) {
 	case 1:
 		container->opt |= CONTAINER_VALID;
@@ -1075,6 +1060,10 @@ static int read_container(struct container* container, int fd)
 exit:
 	if (roothash != NULL)
 		free(roothash);
+	if (digest != NULL)
+		free(digest);
+	if (pubkey != NULL)
+		free(pubkey);
 	return r;
 }
 
@@ -1214,12 +1203,6 @@ exit:
 	return r;
 }
 
-struct region {
-	off64_t offset;
-	size_t size;
-	uint8_t *data;
-};
-
 static int cat_container(const struct container* container, int fd, int treefd, uint8_t* roothash, uint8_t* digest, uint8_t* pubkey, uint8_t* header)
 {
 	int r = 0;
@@ -1262,16 +1245,16 @@ static int cat_container(const struct container* container, int fd, int treefd, 
 
 	/* write metadata */
 	const struct region regions[] = {
-			{container->root.offset, container->root.size, roothash},
-			{container->digest.offset, container->digest.size, digest},
-			{container->key.offset, container->key.size, pubkey},
-			{container->header.offset, container->header.size, header},
+			{container->root.offset, container->root.size, 0, &roothash},
+			{container->digest.offset, container->digest.size, 0, &digest},
+			{container->key.offset, container->key.size, 0, &pubkey},
+			{container->header.offset, container->header.size, 0, &header},
 	};
 
 	for (size_t i = 0; i < ARRAY_SIZE(regions); ++i) {
-		r = pwrite_bytes(fd, regions[i].offset, regions[i].data, regions[i].size);
+		r = pwrite_bytes(fd, regions[i].offset, *(regions[i].data), regions[i].size);
 		if (r != 0) {
-			pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
+			pr_err("failed writing to FILE: [%d] %s\n", -r, strerror(-r));
 			goto exit;
 		}
 	}
