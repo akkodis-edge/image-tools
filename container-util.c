@@ -20,6 +20,8 @@
 #include <openssl/store.h>
 #include <libcryptsetup.h>
 
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+
 // FIXME:  Add test if FILE is symbolic link
 // FIXME:  GPL-2.0-or-later
 // FIXME:  cryptsetup license
@@ -199,6 +201,7 @@ struct container {
 	struct section root;
 	struct section digest;
 	struct section key;
+	struct section header;
 	uint8_t *roothash;
 	size_t roothash_size;
 	EVP_PKEY *pkey;
@@ -226,7 +229,7 @@ static void dump_container(const struct container* container)
 			"  root:     %-10" PRIu64 " [%zu b]\n"
 			"  pubkey:   %-10" PRIu64 " [%zu b]\n"
 			"  digest:   %-10" PRIu64 " [%zu b]\n"
-			"\n"
+			"  header:   %-10" PRIu64 " [%zu b]\n"
 			"  key type: %s-%d\n"
 			"  roothash: %s\n",
 				container->data.offset, container->data.size,
@@ -234,6 +237,7 @@ static void dump_container(const struct container* container)
 				container->root.offset, container->root.size,
 				container->key.offset, container->key.size,
 				container->digest.offset, container->digest.size,
+				container->header.offset, container->header.size,
 				key_type ? key_type : "unknown", EVP_PKEY_get_bits(container->pkey),
 				hex);
 
@@ -309,7 +313,6 @@ static int pwrite_bytes(int fd, off64_t offset, const uint8_t* buf, ssize_t byte
 	return write_bytes(fd, buf, bytes);
 }
 
-
 static int padto_multiple_of(int fd, off64_t multiple)
 {
 	if (multiple < 1)
@@ -318,7 +321,6 @@ static int padto_multiple_of(int fd, off64_t multiple)
 	if (size < 0)
 		return -errno;
 	const off64_t modulus = -size % multiple;
-	pr_dbg("modulus %lld\n", modulus);
 	if (modulus == 0)
 		return 0;
 	const ssize_t remaining = (ssize_t) multiple + modulus;
@@ -607,7 +609,6 @@ static int read_and_compare_public_key(const char* path, const EVP_PKEY* pkey)
 		OPENSSL_free(data);
 		data = NULL;
 
-
 		if (r == 1) {
 			pr_info("%s: pubkey used for validation\n", path);
 			goto exit;
@@ -647,7 +648,7 @@ static int read_and_compare_public_dir(const char* pubkey_dir, const EVP_PKEY* p
 			pr_err("%s: failed asprintf: [%d]: %s\n", pubkey_dir, -r, strerror(-r));
 			goto exit;
 		}
-		/* Attemt comparison if path is regular file */
+		/* Attemtp comparison if path is regular file */
 		struct stat st;
 		memset(&st, 0, sizeof(st));
 		r = 0;
@@ -739,9 +740,11 @@ static int create_container_header(struct container* container, uint8_t* buf, si
 			|| (container->tree.size == 0)   || (container->tree.size > INT64_MAX)
 			|| (container->root.size == 0)   || (container->root.size > INT64_MAX)
 			|| (container->digest.size == 0) || (container->digest.size > INT64_MAX)
-			|| (container->key.size == 0)    || (container->key.size > INT64_MAX))
+			|| (container->key.size == 0)    || (container->key.size > INT64_MAX)
+			|| (container->header.size == 0) || (container->header.size > INT64_MAX))
 		return -EINVAL;
 
+	/* fill in offsets */
 	container->data.offset = 0;
 	if (container->data.size > INT64_MAX)
 		return -EINVAL;
@@ -755,7 +758,12 @@ static int create_container_header(struct container* container, uint8_t* buf, si
 	if (container->digest.offset > INT64_MAX - (int64_t) container->digest.size)
 		return -EINVAL;
 	container->key.offset = container->digest.offset + container->digest.size;
+	if (container->key.offset > INT64_MAX - (int64_t) container->key.size)
+		return -EINVAL;
+	container->header.offset = container->key.offset + container->key.size;
 
+
+	/* prepare header */
 	struct header hdr;
 	memset(&hdr, 0, sizeof(hdr));
 	hdr.magic = HEADER_MAGIC;
@@ -764,6 +772,7 @@ static int create_container_header(struct container* container, uint8_t* buf, si
 	hdr.key_offset = container->key.offset;
 	hdr.digest_offset = container->digest.offset;
 
+	/* write to buffer */
 	u32tole(hdr.magic, buf + offsetof(struct header, magic));
 	memcpy(buf + offsetof(struct header, rsvd), &hdr.rsvd, member_size(struct header, rsvd));
 	u64tole(hdr.tree_offset, buf + offsetof(struct header, tree_offset));
@@ -812,8 +821,10 @@ static int read_container_header(int fd, struct container* container)
 	pr_dbg("hdr.key_offset: 0x%" PRIx32 "\n", hdr.key_offset);
 
 	/* validate offsets, set size to 0 if invalid */
+	container->header.offset = header_pos;
+	container->header.size = HEADER_SIZE;
 	container->key.offset = hdr.key_offset;
-	container->key.size = header_pos > container->key.offset ? header_pos - container->key.offset : 0;
+	container->key.size = header_pos > container->key.offset ? container->header.offset - container->key.offset : 0;
 	container->digest.offset = hdr.digest_offset;
 	container->digest.size = container->key.offset > container->digest.offset ? container->key.offset - container->digest.offset : 0;
 	container->root.offset = hdr.root_offset;
@@ -825,7 +836,7 @@ static int read_container_header(int fd, struct container* container)
 
 	/* check if any offset is invalid */
 	if ((container->key.size == 0) | (container->digest.size == 0) | (container->root.size == 0)
-		| (container->tree.size == 0) | (container->data.size == 0)) {
+		| (container->tree.size == 0) | (container->data.size == 0) | (container->header.size == 0)) {
 		pr_dbg("container - insane header offsets\n")
 		return -ENOMSG; /* not of type container */
 	}
@@ -1206,6 +1217,12 @@ exit:
 	return r;
 }
 
+struct region {
+	off64_t offset;
+	size_t size;
+	uint8_t *data;
+};
+
 static int cat_container(const struct container* container, int fd, int treefd, uint8_t* roothash, uint8_t* digest, uint8_t* pubkey, uint8_t* header)
 {
 	int r = 0;
@@ -1246,32 +1263,20 @@ static int cat_container(const struct container* container, int fd, int treefd, 
 		goto exit;
 	}
 
-	/* write roothash */
-	r = pwrite_bytes(fd, container->root.offset, roothash, container->root.size);
-	if (r != 0) {
-		pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
-		goto exit;
-	}
+	/* write metadata */
+	const struct region regions[] = {
+			{container->root.offset, container->root.size, roothash},
+			{container->digest.offset, container->digest.size, digest},
+			{container->key.offset, container->key.size, pubkey},
+			{container->header.offset, container->header.size, header},
+	};
 
-	/* write digest */
-	r = pwrite_bytes(fd, container->digest.offset, digest, container->digest.size);
-	if (r != 0) {
-		pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
-		goto exit;
-	}
-
-	/* write pubkey */
-	r = pwrite_bytes(fd, container->key.offset, pubkey, container->key.size);
-	if (r != 0) {
-		pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
-		goto exit;
-	}
-
-	/* write header */
-	r = write_bytes(fd, header, HEADER_SIZE);
-	if (r != 0) {
-		pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
-		goto exit;
+	for (size_t i = 0; i < ARRAY_SIZE(regions); ++i) {
+		r = pwrite_bytes(fd, regions[i].offset, regions[i].data, regions[i].size);
+		if (r != 0) {
+			pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
+			goto exit;
+		}
 	}
 
 	r = 0;
@@ -1350,8 +1355,9 @@ static int write_container(int fd, const char* path, EVP_PKEY* pkey, struct cont
 	container->key.size = (size_t) pubkey_bytes;
 
 	/* create header */
+	container->header.size = HEADER_SIZE;
 	uint8_t header_buf[HEADER_SIZE];
-	r = create_container_header(container, header_buf, HEADER_SIZE);
+	r = create_container_header(container, header_buf, container->header.size);
 	if (r != 0) {
 		pr_err("failed creating header: %[%d]: %s\n", -r, strerror(-r));
 		goto exit;
