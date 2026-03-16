@@ -3,6 +3,7 @@
 
 TMP="NONE"
 VERITY="NONE"
+path=""
 
 cleanup() {
 	if [ "$TMP" != "NONE" ]; then
@@ -10,7 +11,7 @@ cleanup() {
 			umount "$TMP"/mnt
 		fi
 		if [ "$VERITY" != "NONE" ]; then
-			veritysetup close "$VERITY"
+			PATH="$path:$PATH" container-util --close "$VERITY" || die "Failed closing container"
 			VERITY="NONE"
 		fi
 		rm -r "$TMP"
