@@ -1,0 +1,14 @@
+The default license for this project is (MIT) found in COPYING file.
+
+There is a different license for:
+
+**container-util.c** - GNU General Public License version 2, or any later version, see COPYING.cryptsetup
+
+Following files have code copied from other sources:
+
+**container-util.c:**
+From crypsetup with license COPYING.cryptsetup - GNU General Public License version 2, or any later version
+lib/utils_crypt.c/hex_to_bin()
+lib/utils_crypt.c/hex2asc()
+lib/utils_crypt.c/crypt_hex_to_bytes()
+lib/utils_crypt.c/crypt_bytes_to_hex()
