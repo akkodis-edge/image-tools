@@ -5,7 +5,7 @@ Collection of tools for working with images of various types.
 
 ```
 # Dependencies
-apt install squashfs-tools cryptsetup-bin
+apt install squashfs-tools build-essential libcryptsetup-dev libssl-dev pkcs11-provider
 
 # Build
 make
@@ -215,6 +215,24 @@ $ install-image-container.sh -d BLOCKDEVICE --key-dir PUBKEYDIR --verify-device
 It is the responsibility of preinstall and postinstall scripts to return non-zero exit code on errors.
 An exit code of zero means the execution was successful.
 
+Hash function will be selected based on key bits. Only RSA and ECDSA type keys are supported.
+PKCS#1 v1.5 padding is used with RSA keys.
+
++-------+----------+--------+
+| KEY   | BITS     | HASH   |
++-------+----------+--------+
+| RSA   | <  7680  | SHA256 |
++-------+----------+--------+
+| RSA   | >= 7680  | SHA384 |
++-------+----------+--------+
+| RSA   | >= 15360 | SHA512 |
++-------+----------+--------+
+| ECDSA | <  384   | SHA256 |
++-------+----------+--------+
+| ECDSA | >= 384   | SHA384 |
++-------+----------+--------+
+| ECDSA | >= 512   | SHA512 |
++-------+----------+--------+
 ```
 
 ### simple-container.sh
