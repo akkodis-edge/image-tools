@@ -5,8 +5,8 @@ exec_prefix ?= $(prefix)
 bindir ?= $(exec_prefix)/bin
 systemd_system_unitdir ?= $(libdir)/systemd/system
 
-# Hide all deprecated symbols up to 3.5.0
-OPENSSL_FLAGS = -DOPENSSL_API_COMPAT=30500 -DOPENSSL_NO_DEPRECATED
+# Hide all deprecated symbols up to 3.0.2
+OPENSSL_FLAGS = -DOPENSSL_API_COMPAT=30002 -DOPENSSL_NO_DEPRECATED
 CFLAGS += -Wall -Wextra -Werror -std=gnu17 -pedantic -O3 -D_GNU_SOURCE $(OPENSSL_FLAGS)
 
 # Disable sanitizers by default
