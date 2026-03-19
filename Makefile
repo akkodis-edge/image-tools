@@ -42,7 +42,7 @@ ifeq ($(abspath $(BUILD)),$(shell pwd))
 $(error "ERROR: Build dir can't be equal to source dir")
 endif
 
-ALL_TARGETS_BIN = container-util image-install install-image-container install-usb-image make-image-container swap-root gpt-insert
+ALL_TARGETS_BIN = container-util install-image-container make-image-container swap-root gpt-insert
 
 USE_SYSTEMD ?= 1
 ifeq ($(USE_SYSTEMD), 1)
@@ -63,15 +63,7 @@ $(BUILD)/container-util: $(BUILD)/container-util.o
 	mkdir -p $(BUILD)
 	$(CC) -o $@ $^ $(LDFLAGS) -lcrypto -lcryptsetup
 
-$(BUILD)/image-install: image-install.py
-	mkdir -p $(BUILD)
-	install -m 0755 $< $@
-
 $(BUILD)/install-image-container: install-image-container.sh
-	mkdir -p $(BUILD)
-	install -m 0755 $< $@
-
-$(BUILD)/install-usb-image: install-usb-image.sh
 	mkdir -p $(BUILD)
 	install -m 0755 $< $@
 
@@ -126,5 +118,5 @@ test: $(BUILD)/container-util
 	./test-container-util.py
 
 .PHONY: test-su
-test-su: $(BUILD)/container-util $(BUILD)/install-image-container $(BUILD)/image-install $(BUILD)/make-image-container
+test-su: $(BUILD)/container-util $(BUILD)/install-image-container $(BUILD)/make-image-container
 	./test-container-su.sh
