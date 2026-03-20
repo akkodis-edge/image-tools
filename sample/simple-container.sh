@@ -70,6 +70,7 @@ print_usage() {
 	echo "  --data-label              data partition label"
 	echo "  --data-size-mib           data partition size"
 	echo "  --data-fstype             data partition type"
+	echo "  -p,--path                 Additional \$PATH for built image-tools"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -176,6 +177,12 @@ while [ "$#" -gt 0 ]; do
 		shift # past argument
 		shift # past value
 		;;
+	-p|--path)
+		[ "$#" -gt 1 ] || die "Invalid argument -p/--path"
+		path="$2"
+		shift # past argument
+		shift # past value
+		;;
 	-h/--help)
 		print_usage
 		exit 1
@@ -272,9 +279,9 @@ if [ "x$rootfs_label" != "x" ]; then
 		# Build and inject rootfs
 		echo "Building and inserting rootfs"
 		build_filesystem "${build}/rootfs" "${build}/partition.rootfs" "$rootfs_fstype" "$rootfs_size_mib" "$rootfs_image"
-		gpt-insert --label "$rootfs_label" --input "${build}/partition.rootfs" "${build}/disk.img" || die "Failed inserting filesystem in disk"
+		PATH="$path:$PATH" gpt-insert --label "$rootfs_label" --input "${build}/partition.rootfs" "${build}/disk.img" || die "Failed inserting filesystem in disk"
 		# Build rootfs update container
-		make-image-container --build "${build}/update" --partitions "${build}/partition.rootfs" --key "$keyfile" "${build}/${name}-update.container" || die "Failed creating update container"
+		PATH="$path:$PATH" make-image-container --build "${build}/update" --partitions "${build}/partition.rootfs" --key "$keyfile" "${build}/${name}-update.container" || die "Failed creating update container"
 	fi
 fi
 
@@ -288,7 +295,7 @@ if [ "x$data_label" != "x" ]; then
 	# Format partition
 	echo "Building and inserting data partition"
 	build_filesystem "${build}/data" "${build}/partition.data" "$data_fstype" "$data_size_mib" ""
-	gpt-insert --label "$data_label" --input "${build}/partition.data" "${build}/disk.img" || die "Failed inserting filesystem in disk"
+	PATH="$path:$PATH" gpt-insert --label "$data_label" --input "${build}/partition.data" "${build}/disk.img" || die "Failed inserting filesystem in disk"
 fi
 
 # Dump partition table
@@ -306,7 +313,7 @@ parted -s --fix "$1" align-check optimal 1
 EOF
 
 # Build full disk container
-make-image-container --build "${build}/disk" --disk "${build}/disk.img" --key "$keyfile" --postinstall "${build}/fix-gpt.sh" "${build}/${name}-disk.container" || die "Failed creating disk container"
+PATH="$path:$PATH" make-image-container --build "${build}/disk" --disk "${build}/disk.img" --key "$keyfile" --postinstall "${build}/fix-gpt.sh" "${build}/${name}-disk.container" || die "Failed creating disk container"
 
 echo "Success!"
 
