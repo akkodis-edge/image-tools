@@ -1,5 +1,4 @@
 #!/bin/bash
-# Require bash due to builtin read
 
 TMP="NONE"
 VERITY="NONE"
@@ -32,11 +31,8 @@ print_usage() {
     echo "Mandatory:"
     echo "  -d,--device           Path to target blockdevice"
     echo "Optional:"
-    echo "  -c,--conf             Path to yaml config describing disk, allows overriding full disk install. To be used with --images"
-    echo "                        Value of - means config in stdin"
-    echo "  -i,--images           Space separated list of imagename=imagepath. Relative path to image within container. To be used with --conf"
     echo "  --any-pubkey          Flag to only use public key in container for validation -- do not match public key to known key"
-    echo "  -p,--path             Additional \$PATH for image-install and container-util application"
+    echo "  -p,--path             Additional \$PATH for container-util application"
     echo "  --key-dir             Path to directory of public keys for validating container signature"
     echo "  --verify-device       Verify disk image to device by:"
     echo "                         - zero full device before image installation"
@@ -45,9 +41,14 @@ print_usage() {
     echo "                         - sha256 whole device and compare to disk sha256 in container"
     echo "                         - return 0 if sha256 sums are equal"
     echo "                        Warning: should only be used with full disk images and no partitions"
+    echo "  --alias               Map container partitions to actual partition names with form \"name:target\""
+    echo "                        For example a container partition named rootfs can be mapped to rootfs2 by:"
+    echo "                        \"rootfs:rootfs2\". This option can be supplied multiple times."
     echo "  --reset-nvram-update  Reset nvram A/B update to defaults"
+    echo "  --unmount             Unmount target --device before installation"
 }
 
+declare -A part_aliases
 validate_pubkey="yes"
 while [ "$#" -gt 0 ]; do
 	case $1 in
@@ -60,18 +61,6 @@ while [ "$#" -gt 0 ]; do
 	-p|--path)
 		[ "$#" -gt 1 ] || die "Invalid argument -p/--path"
 		path="$2"
-		shift # past argument
-		shift # past value
-		;;
-	-c|--conf)
-		[ "$#" -gt 1 ] || die "Invalid argument -c/--conf"
-		conf="$2"
-		shift # past argument
-		shift # past value
-		;;
-	-i|--images)
-		[ "$#" -gt 1 ] || die "Invalid argument -i/--images"
-		images="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -92,6 +81,19 @@ while [ "$#" -gt 0 ]; do
 	--reset-nvram-update)
 		reset_nvram_update="yes"
 		shift # past argument
+		;;
+	--unmount)
+		unmount="yes"
+		shift # past argument
+		;;
+	--alias)
+		[ "$#" -gt 1 ] || die "Invalid argument --alias"
+		declare -a tmpalias
+		readarray -d ":" -t tmpalias < <(printf "%s" "$2")
+		[ ${#tmpalias[@]} -eq 2 ] || die "Invalid argument --alias"
+		part_aliases["${tmpalias[0]}"]="${tmpalias[1]}"
+		shift # past argument
+		shift # past value
 		;;
 	-*|--*)
 		print_usage
@@ -124,40 +126,87 @@ VERITY="imageinstaller"
 mkdir "${TMP}/mnt" || die "Failed creating mnt dir"
 mount -t squashfs -o ro /dev/mapper/imageinstaller "${TMP}/mnt" || die "Failed mounting squashfs" 
 
+# Detect whether individual partitions are provided
+declare -A partition_targets
+declare -A partition_devices
+partition_images="$(find "${TMP}/mnt"  -name 'partition\.*' ! -name '*.bmap' -type f,l)" || die "Failed reading container content"
+if [ "x$partition_images" != "x" ]; then
+	for image in "$partition_images"; do
+		# Strip path and file prefix "partition." to get target partition name
+		partname="${image#*partition.}"
+		# Use alias if available
+		if [ "x${part_aliases["$partname"]}" != "x" ]; then
+			tmp="$partname"
+			partname="${part_aliases["$partname"]}"
+			unset part_aliases["$tmp"]
+		fi
+		partition_targets["$partname"]="$image"
+		# resolve partition name to blockdevice
+		blkdev="$(blkid -l -o device -t PARTLABEL="$partname" "$device")" || die "Failed finding blockdev for partition \"$partname\""
+		partition_devices["$partname"]="$blkdev"
+	done
+	echo "Targets:"
+	for part in "${!partition_targets[@]}"; do
+		echo "  ${partition_devices["$part"]}[$part]=${partition_targets["$part"]}"
+	done
+fi
+
+if [ "${#part_aliases[@]}" -ne 0 ]; then
+	echo "Provided aliases did not match partitions in container"
+	for part in "${!part_aliases[@]}"; do
+		echo "  $part=${part_aliases[$part]}"
+	done
+	die "ERROR: unused aliases"
+fi
+
+# Detect whether full disk image is provided
+if [ -f "${TMP}/mnt/disk.img" ]; then
+	disk_image="${TMP}/mnt/disk.img"
+fi
+
+# Something must be installable
+[ "x$partition_images" = "x" -a "x$disk_image" = "x" ] && die "ERROR: container contains no disk or partition images"
+# We do not now how to manage both full disk and partition images
+[ "x$partition_images" != "x" -a "x$disk_image" != "x" ] && die "ERROR: container contains both disk and partition images"
+# --verify-device only supported on full disk images
+[ "$verify_device" = "yes" -a "x$partition_images" != "x" ] && die "ERROR: --verify-device only supported on disk images"
+
+# unmount if requested
+if [ "$unmount" = "yes" ]; then
+	if [ "x$disk_image" != "x" ]; then
+		echo "Unmount $device all partitions"
+		# Ignore error code of umount, can't differentiate
+		# "not mounted" from other errors.
+		umount -A -q "$device"
+	fi
+	if [ "x$partition_images" != "x" ]; then
+		for part in "${!partition_devices[@]}"; do
+			echo "Unmount ${partition_devices["$part"]}["$part"]"
+			# Ignore error code of umount, can't differentiate
+			# "not mounted" from other errors.
+			umount -q "${partition_devices["$part"]}"
+		done
+	fi
+fi
+
 # Zero device when verifying device or run preinstall in normal flow
 if [ "$verify_device" = "yes" ]; then
-	zerofill="--zero-fill"
+	echo "Zeroing $device"
+	cat /dev/zero > "$device" || die "Failed zeroing device"
 elif [ -x "${TMP}/mnt/preinstall" ]; then
 	echo "preinstall: $(readlink ${TMP}/mnt/preinstall)"
 	"${TMP}/mnt/preinstall" "$device" || die "Failed executing preinstall"
 fi
 
-echo "Installing image"
-if [ "x$conf" != "x" ]; then
-	# Install individual partitions with config
-	if [ "$conf" = "-" ]; then
-		config="$(cat)"
-	else
-		config="$(cat ${conf})"
-	fi
-	# cd to container for relative --image paths
-	cd "${TMP}/mnt"
-	printf '%s\n' "$config" | PATH="$path:$PATH" image-install --force-unmount --device "$device" --config - $images || die "Failed installing image"
-	# Return to previous dir
-	cd -
-	
-else
-	# Perform full disk installation without config
-	read -r -d '' config <<- EOM
-images:
-   - name: image
-     type: raw-bmap
-     target: device
-     reload_partitions: true
-EOM
-	printf '%s\n' "$config" | PATH="$path:$PATH" image-install $zerofill --force-unmount --wipefs --device "$device" --config - "image=${TMP}/mnt/disk.img" || die "Failed installing image"
+# Perform installation
+if [ "x$disk_image" != "x" ]; then
+	bmaptool copy "$disk_image" "$device" || die "Failed installing disk image"
 fi
-
+if [ "x$partition_images" != "x" ]; then
+	for part in "${!partition_targets[@]}"; do
+		bmaptool copy "${partition_targets["$part"]}" "${partition_devices["$part"]}" || die "Failed installing partition image"
+	done
+fi
 
 # Validate device sha256sum when verifying device or run postinstall in normal flow
 if [ "$verify_device" = "yes" ]; then
