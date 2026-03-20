@@ -1,20 +1,7 @@
 #!/bin/sh
 
-LODEV="NONE"
-
-cleanup() {
-	if [ "$LODEV" != "NONE" ]; then
-		if ! losetup -d "$LODEV"; then
-			echo "Failed destroying loopback device"
-			exit 1
-		fi
-		LODEV="NONE"
-	fi
-}
-
 die () {
 	echo "$1"
-	cleanup
 	exit 1
 }
 
@@ -28,10 +15,7 @@ print_usage() {
     echo "Optional:"
     echo "  --partitions      Space separated list to paths of partitions"
     echo "  --disk            Path to disk image"
-    echo "  -c,--conf         Path to yaml config describing disk"
-    echo "  -i,--images       Space separated list of imagename=imagepath"
-    echo "                    where imagename is defined by --conf file."
-    echo "  -p,--path         Additional \$PATH for image-install and container-util application"
+    echo "  -p,--path         Additional \$PATH for container-util application"
     echo "  --key             Path to private key for signing image"
     echo "  --key-pkcs11      PKCS#11 URL for private key"
     echo "  --disk-name       Name to use for disk image inside container"
@@ -44,12 +28,6 @@ while [ "$#" -gt 0 ]; do
 	-b|--build)
 		[ "$#" -gt 1 ] || die "Invalid argument -b/--build"
 		build="$(realpath -s --relative-to=./ ${2})" || die "Failed getting build path"
-		shift # past argument
-		shift # past value
-		;;
-	-c|--conf)
-		[ "$#" -gt 1 ] || die "Invalid argument -c/--conf"
-		conf="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -68,12 +46,6 @@ while [ "$#" -gt 0 ]; do
 	--disk)
 		[ "$#" -gt 1 ] || die "Invalid argument --disk"
 		disk="$2"
-		shift # past argument
-		shift # past value
-		;;
-	-i|--images)
-		[ "$#" -gt 1 ] || die "Invalid argument -i/--images"
-		images="$2"
 		shift # past argument
 		shift # past value
 		;;
@@ -119,15 +91,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "x$build" != "x" ] || die "Missing argument -b/--build"
-[ "x$conf" = "x" -a "x$partitions" = "x" -a "x$disk" = "x" ] && die "Missing argument -c/--conf, --partitions or --disk"
+[ "x$partitions" = "x" -a "x$disk" = "x" ] && die "Missing argument --partitions or --disk"
 count=0
-if [ "x$conf" != "x" ]; then
-	[ "$(id -u)" -eq 0 ] || die "--conf must be run as root"
-	count=$(( $count + 1 ))
-fi
 [ "x$partitions" != "x" ] && count=$(( $count + 1 ))
 [ "x$disk" != "x" ] && count=$(( $count + 1 ))
-[ $count -eq 1 ] || ie "Invalid argument -c/--conf, --partitions and --disk are mutually exclusive"
+[ $count -eq 1 ] || ie "Invalid argument --partitions and --disk are mutually exclusive"
 [ "x$container_name" != "x" ] || die "Missing argument CONTAINER"
 [ "x$keyfile" = "x" -a "x$key_pkcs11" = "x" ] && die "No signing method provided"
 
@@ -142,50 +110,6 @@ for x in "$container_name" "$preinstall" "$postinstall" $partitions; do
 done
 
 mkdir -p "$build" || die "Failed creating build dir"
-
-if [ "x$conf" != "x" ]; then
-	# Get size in bytes from config file:
-	# disk:
-	#   size: BYTES
-	cmd="from yaml import safe_load; print(safe_load(open(\"${conf}\"))['disk']['size'])"
-	disk_size="$(python3 -c "$cmd")" || die "Failed reading disk size from config"
-	
-	disk_image="${build}/disk.img"
-	if [ "x$disk_name" != "x" ]; then
-		disk_image="${build}/${disk_name}"
-	fi
-
-	# Disk image will be sparse, remove any existing image to start from fresh sparse image
-	rm -f "$disk_image" || die "Failed removing disk image"LS
-	
-	truncate -s "$disk_size" "$disk_image" || die "Failed creating disk image"
-	LODEV="$(losetup --show -P -f ${disk_image})" || die "Failed creating loopback device"
-	
-	# Finalize disk image
-	cat "$conf"
-	echo ""
-	PATH="$path:$PATH" image-install --config "$conf" --device "$LODEV" $images || die "Failed finalizing image"
-	# Remove loopback device
-	cleanup
-	
-	# Calculate checksum
-	echo "Calculating disk sha256"
-	disk_sha256="$(cat ${disk_image} | sha256sum)" || die "Failed calculating checksum"
-	echo "$disk_sha256" > "${disk_image}.sha256" || die "Failed writing sha256"
-
-	# Create bmap
-	echo "Creating bmap"
-	bmaptool create -o "${disk_image}.bmap" "$disk_image" || die "Failed creating bmap"
-
-	artifacts="${disk_image} ${disk_image}.sha256 ${disk_image}.bmap"
-	# Create symlink for disk image if name provided
-	if [ "x$disk_name" != "x" ]; then
-		ln -sf "$(basename ${disk_image})" "${build}/disk.img" || die "Failed creating link"
-		ln -sf "$(basename ${disk_image}).sha256" "${build}/disk.img.sha256" || die "Failed creating link"
-		ln -sf "$(basename ${disk_image}).bmap" "${build}/disk.img.bmap" || die "Failed creating link"
-		artifacts="${artifacts} ${build}/disk.img ${build}/disk.img.sha256"
-	fi
-fi
 
 if [ "x$partitions" != "x" ]; then
 	artifacts=""
