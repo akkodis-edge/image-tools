@@ -1,5 +1,4 @@
-#!/bin/bash
-# Require bash due to builtin read
+#!/bin/sh
 
 die() {
 	>&2 echo "${1}"
@@ -12,6 +11,7 @@ exit_success() {
 
 # Parse arguments
 cmd_update=""
+container="yes"
 cmd_state=""
 cmd_commit=""
 cmd_cancel=""
@@ -39,7 +39,7 @@ print_usage() {
 	echo " counter [VALUE]      Read or write counter. Writing counter not allowed when has-manual-counter is false"
 	echo ""
     echo "Options:"
-    echo " -c/--container       IMAGE is of type CONTAINER"
+    echo " -c/--container       IMAGE is of type CONTAINER. This is the default operation."
     echo " -h/--help:           This help message"
 }
 
@@ -183,33 +183,9 @@ if [ "$cmd_update" = "true" ]; then
 	echo "Device:       $current_root_device"
 	echo "Current root: $current_root_label"
 	echo "New root:     $new_root_label"
-	echo "Partition device and install images.."
-	if [ "$container" = "yes" ]; then
-		# Install container
-		read -r -d '' config <<- EOM
-images:
-   - name: image
-     type: raw-bmap
-     target: "label-raw:${new_root_label}"
-EOM
-		printf '%s\n' "$config"
-		printf '%s\n' "$config" | install-image-container --device "$current_root_device" --any-pubkey --conf - --images "image=partition.rootfs" "$image" || die "Failed installation"
-	else
-		# Legacy mode with tar.bz2 installed to ext4 partition
-		read -r -d '' config <<- EOM
-partitions:
-   - label: "${new_root_label}"
-     type: ext4
-
-images:
-   - name: image
-     type: tar.bz2
-     target: "label:${new_root_label}"
-EOM
-		printf '%s\n' "$config"
-		printf '%s\n' "$config" | image-install --device "$current_root_device" --force-unmount --config - "image=${image}" || die "Failed installation"
-
-	fi
+	echo "Installing image.."
+	# Install container
+	install-image-container --device "$current_root_device" --any-pubkey --alias "rootfs:${new_root_label}" "$image" || die "Failed installation"
 	echo "Success!"
 
 	NVRAM_SYSTEM_UNLOCK=16440 nvram --sys --set SYS_BOOT_SWAP "$new_root_label" || die "Failed setting nvram variable SYS_BOOT_SWAP"
