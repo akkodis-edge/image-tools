@@ -1630,7 +1630,7 @@ int main(int argc, char *argv[])
 	filefd = open(cfg.filepath, O_RDONLY | O_CLOEXEC);
 	if (filefd < 0) {
 		r = -errno;
-		pr_err("%s: [%d] %s\n", cfg.filepath, cfg.filepath, -r, strerror(-r));
+		pr_err("%s: [%d] %s\n", cfg.filepath -r, strerror(-r));
 		goto exit;
 	}
 
