@@ -217,6 +217,9 @@ class test_verify(unittest.TestCase):
         assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key, self.header)
         with self.assertRaises(EBADF):
             container_util_verify(self.container, public_key=self.public_key)
+    def test_error_no_file(self):
+        with self.assertRaises(ENOENT):
+            container_util_verify(os.path.join(self.dir, 'no-container'), public_key=self.public_key)
 
 class test_create(unittest.TestCase):
     @classmethod
