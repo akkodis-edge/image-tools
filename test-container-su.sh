@@ -43,35 +43,19 @@ echo content1 > "${TMP}/file1" || die "Failed making file"
 echo content2 > "${TMP}/file2" || die "Failed making file"
 tar -jcf "${TMP}/sample.tar.bz2" -C "$TMP" file1 file2 || die "Failed making archive"
 
-# Make sample disk config
-cat << EOF > "${TMP}/disk-conf.yaml"
-disk:
-   size: 20971520
-partitions:
-   - type: table_gpt
-   - label: first
-     type: ext4
-     size: 10
-images:
-   - name: image
-     type: tar.bz2
-     target: label:first
-EOF
-
-# build container
-mkdir "${TMP}/build" || die "Failed creating build dir"
-sudo build/make-image-container -c "${TMP}/disk-conf.yaml" \
-    --images "image=${TMP}/sample.tar.bz2" --key "${TMP}/keys/private.pem" \
-    --path build --build "${TMP}/build" \
-    "${TMP}/sample.container" || die "Failed creating container"
+# Make disk container
+sample/simple-container.sh --build "${TMP}/build" --name sample --key "${TMP}/keys/private.pem" \
+    --disk-size-gb 1 --disk-size-ratio 0.96 \
+    --rootfs-label rootfs1 --rootfs-fstype ext4 --rootfs-size-mib 40 \
+    --rootfs-image "${TMP}/sample.tar.bz2" --path build/ || die "Failed creating container"
 
 # prepare target device
-truncate -s 21000192 "${TMP}/blockdevice" || die "Failed creating blockdevice"
+truncate -s 1000000000 "${TMP}/blockdevice" || die "Failed creating blockdevice"
 LODEV="$(sudo losetup --show -P -f "${TMP}/blockdevice")" || die "Failed creating loopback device"
 
 # Install container
 sudo build/install-image-container --device "$LODEV" --key-dir "${TMP}/keys" \
-    --path build "${TMP}/sample.container" || die "Failed installing container"
+    --path build "${TMP}/build/sample-disk.container" || die "Failed installing container"
 
 mkdir "${TMP}/mnt" || die "Failed creating mount dir"
 sudo mount "${LODEV}p1" "${TMP}/mnt" || die "Failed mounting loop device"
