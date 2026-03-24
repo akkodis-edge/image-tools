@@ -176,7 +176,11 @@ fi
 all_mounted=""
 if [ "x$disk_image" != "x" ]; then
 	# Find mounted partitions on device
-	all_mounted="$(cut -d ' ' -f 1 /proc/self/mounts | grep "^${device}*" | tr '\n' ' ')" || die "Failed checking /proc/self/mounts"
+	# If device name ends with a digit the partitions will be prefixed with a "p",
+	# for example device /devmmcblk0 first partition is /dev/mmcblk0p1
+	prefix=""
+	[[ "$device" =~ .[0-9]$ ]] && prefix="p"
+	all_mounted="$(cut -d ' ' -f 1 /proc/self/mounts | grep "^${device}${prefix}*" | tr '\n' ' ')" || die "Failed checking /proc/self/mounts"
 fi
 if [ "x$partition_images" != "x" ]; then
 	# Check if target partitions are mounted
