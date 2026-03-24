@@ -210,11 +210,13 @@ fi
 
 # Perform installation
 if [ "x$disk_image" != "x" ]; then
-	bmaptool copy "$disk_image" "$device" || die "Failed installing disk image"
+	bmaptool copy --bmap "${disk_image}.bmap" "$disk_image" "$device" || die "Failed installing disk image"
 fi
 if [ "x$partition_images" != "x" ]; then
 	for part in "${!partition_targets[@]}"; do
-		bmaptool copy "${partition_targets["$part"]}" "${partition_devices["$part"]}" || die "Failed installing partition image"
+		bmaptool copy --bmap "${partition_targets["$part"]}.bmap" \
+							"${partition_targets["$part"]}" \
+							"${partition_devices["$part"]}" || die "Failed installing partition image"
 	done
 fi
 
