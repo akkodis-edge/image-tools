@@ -10,8 +10,9 @@ cleanup() {
 			umount "$TMP"/mnt
 		fi
 		if [ "$VERITY" != "NONE" ]; then
-			PATH="$path:$PATH" container-util --close "$VERITY" || die "Failed closing container"
+			tmpverity="$VERITY"
 			VERITY="NONE"
+			PATH="$path:$PATH" container-util --close "$tmpverity" || die "Failed closing container"
 		fi
 		rm -r "$TMP"
 		TMP="NONE"
