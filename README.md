@@ -9,10 +9,10 @@ apt install build-essential libcryptsetup-dev libssl-dev
 
 # Additional runtime dependencies
 apt install python3-parted squashfs-tools pkcs11-provider bash util-linux bmaptool parted fakeroot \
-		e2fsprogs dosfstools udev tar openssl-bin
+		e2fsprogs dosfstools udev tar openssl bc
 
 # Additional testing dependencies
-apt install python3-cryptography cryptsetup
+apt install python3-cryptography cryptsetup sudo
 
 # Build
 make
@@ -22,6 +22,19 @@ make test
 
 # Run tests requiring super user privilegies
 make test-su
+
+# Running distro tests
+# debian 13 / trixie
+docker build -t image-tools:debian13 -f debian13.dockerfile .
+docker run -i -v /dev:/dev --privileged image-tools:debian13 /bin/sh -c 'make clean && make test && make test-su'
+# ubuntu 24.04
+docker build -t image-tools:ubuntu2404 -f ubuntu2404.dockerfile .
+docker run -i -v /dev:/dev --privileged image-tools:ubuntu2404 /bin/sh -c 'make clean && make test && make test-su'
+# archlinux
+docker build -t image-tools:archlinux -f archlinux.dockerfile .
+docker run -i -v /dev:/dev --privileged image-tools:archlinux /bin/sh -c 'make clean && make test && make test-su'
+
+
 ```
 
 ## Image container
