@@ -118,5 +118,5 @@ test: $(BUILD)/container-util
 	./test-container-util.py
 
 .PHONY: test-su
-test-su: $(BUILD)/container-util $(BUILD)/install-image-container $(BUILD)/make-image-container
+test-su: $(BUILD)/container-util $(BUILD)/install-image-container $(BUILD)/make-image-container $(BUILD)/gpt-insert
 	./test-container-su.sh
