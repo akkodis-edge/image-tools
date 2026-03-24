@@ -171,22 +171,31 @@ fi
 # --verify-device only supported on full disk images
 [ "$verify_device" = "yes" -a "x$partition_images" != "x" ] && die "ERROR: --verify-device only supported on disk images"
 
+# Check if mounted
+all_mounted=""
+if [ "x$disk_image" != "x" ]; then
+	# Find mounted partitions on device
+	all_mounted="$(cut -d ' ' -f 1 /proc/self/mounts | grep "^${device}*" | tr '\n' ' ')" || die "Failed checking /proc/self/mounts"
+fi
+if [ "x$partition_images" != "x" ]; then
+	# Check if target partitions are mounted
+	for part in "${partition_devices[@]}"; do
+		if findmnt "$part" >/dev/null; then
+			all_mounted="$all_mounted $part"
+		fi
+	done
+fi
+# trim whitespace from all_mounted
+read -r all_mounted <<< "$all_mounted"
+
+[ "x$all_mounted" != "x" -a "$unmount" != "yes" ] && die "ERROR: target device partitions mounted: \"$all_mounted\""
+
 # unmount if requested
 if [ "$unmount" = "yes" ]; then
-	if [ "x$disk_image" != "x" ]; then
-		echo "Unmount $device all partitions"
-		# Ignore error code of umount, can't differentiate
-		# "not mounted" from other errors.
-		umount -A -q "$device"
-	fi
-	if [ "x$partition_images" != "x" ]; then
-		for part in "${!partition_devices[@]}"; do
-			echo "Unmount ${partition_devices["$part"]}["$part"]"
-			# Ignore error code of umount, can't differentiate
-			# "not mounted" from other errors.
-			umount -q "${partition_devices["$part"]}"
-		done
-	fi
+	for mounted in $all_mounted; do
+		echo "Unmount $mounted"
+		umount "$mounted" || die "Failed unmounting partition"
+	done
 fi
 
 # Zero device when verifying device or run preinstall in normal flow
