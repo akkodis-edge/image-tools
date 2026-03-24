@@ -13,6 +13,9 @@ cleanup() {
 		if [ -d "${TMP}/mnt" ]; then
 			sudo umount "${TMP}/mnt" || echo "Failed unmount"
 		fi
+		if [ -d "${TMP}/mnt2" ]; then
+			sudo umount "${TMP}/mnt2" || echo "Failed unmount"
+		fi
 		sudo rm -r "$TMP" || echo "Failed removing TMP"
 		TMP="NONE"
 	fi
@@ -47,6 +50,7 @@ tar -jcf "${TMP}/sample.tar.bz2" -C "$TMP" file1 file2 || die "Failed making arc
 sample/simple-container.sh --build "${TMP}/build" --name sample --key "${TMP}/keys/private.pem" \
     --disk-size-gb 1 --disk-size-ratio 0.96 \
     --rootfs-label rootfs1 --rootfs-fstype ext4 --rootfs-size-mib 40 \
+    --rootfs-secondary rootfs2 \
     --rootfs-image "${TMP}/sample.tar.bz2" --path build/ || die "Failed creating container"
 
 # prepare target device
@@ -64,5 +68,25 @@ file2="$(cat "${TMP}/mnt/file2")" || die "Failed reading file2"
 [ "$file1" = "content1" ] || die "Failed file1 content"
 [ "$file2" = "content2" ] || die "Failed file1 content"
 
+# full disk install container fails without --unmount
+sudo build/install-image-container --device "$LODEV" --any-pubkey --path build "${TMP}/build/sample-disk.container" && die "Should fail on unmount on disk"
+# works with --unmount
+sudo build/install-image-container --device "$LODEV" --any-pubkey --path build "${TMP}/build/sample-disk.container" --unmount || die "Failed with unmount on disk"
+
+# update install container fails without --unmount
+sudo mount "${LODEV}p1" "${TMP}/mnt" || die "Failed mounting loop device"
+sudo build/install-image-container --device "$LODEV" --any-pubkey --path build "${TMP}/build/sample-update.container" --alias "rootfs:rootfs1" && die "Should fail on unmount on update"
+# works with --unmmount
+sudo build/install-image-container --device "$LODEV" --any-pubkey --path build "${TMP}/build/sample-update.container" --alias "rootfs:rootfs1" --unmount || die "Failed with unmount on update"
+
+# --unmount detects two mounted partitions
+sudo mount "${LODEV}p1" "${TMP}/mnt" || die "Failed mounting loop device"
+mkdir "${TMP}/mnt2" || die "Failed creating mountpoint"
+sudo mkfs.ext4 "${LODEV}p2" || die "Failed formatting partition"
+sudo mount "${LODEV}p2" "${TMP}/mnt2" || die "Failed mounting loop device"
+sudo build/install-image-container --device "$LODEV" --any-pubkey --path build "${TMP}/build/sample-disk.container" && die "Should fail on unmount on disk"
+sudo build/install-image-container --device "$LODEV" --any-pubkey --path build "${TMP}/build/sample-disk.container" --unmount || die "Failed with unmount on disk"
+
 cleanup
+echo "Success!"
 exit 0
