@@ -37,7 +37,9 @@ build_filesystem() {
 		cmd="$cmd && tar --numeric-owner -xf "$archive" -C "$fsdir""
 	fi
 	if [ "$fstype" = "ext4" ]; then
-		cmd="$cmd && truncate -s "$fs_size_bytes" "$fsimg" && /usr/sbin/mkfs.ext4 -F -b 4096 "$fsimg" -d "$fsdir""
+		# Instruct mkfs to fully initialize file system now instead of first mount.
+		extra="assume_storage_prezeroed=0,lazy_itable_init=0,lazy_journal_init=0"
+		cmd="$cmd && truncate -s "$fs_size_bytes" "$fsimg" && /usr/sbin/mkfs.ext4 -E "$extra" -F -b 4096 "$fsimg" -d "$fsdir""
 	elif [ "$fstype" = "fat32" ]; then
 		cmd="$cmd && /usr/sbin/mkfs.vfat -F 32 -C "$fsimg" "$fs_size_kbytes" && mcopy -i "$fsimg" -smpQ "$fsdir"/* \:\:/ "
 	else
