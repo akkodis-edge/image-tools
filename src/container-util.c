@@ -6,9 +6,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
-#include <stdarg.h>
-#include <stddef.h>
-#include <assert.h>
 #include <stdint.h>
 #include <inttypes.h>
 #include <unistd.h>
@@ -23,6 +20,8 @@
 #include <openssl/store.h>
 #include <openssl/rsa.h>
 #include <libcryptsetup.h>
+#include "log.h"
+#include "header.h"
 
 /* return number of elements in array */
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
@@ -133,57 +132,12 @@ char *crypt_bytes_to_hex(size_t size, const char *bytes)
 	return hex;
 }
 
-/* Get sizeof() struct member */
-#define member_size(type, member) (sizeof(((type *)0)->member))
-
 /* check bit-flag */
 static inline int is_set(int flag, int mask)
 {
 	return (flag & mask) == mask;
 }
 
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-static int dbg = 0;
-static void enable_debug(void)
-{
-	dbg = 1;
-}
-
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-static int info = 1;
-static void disable_info(void)
-{
-	info = 0;
-}
-
-#define pr_dbg(fmt, ...) \
-		if (dbg) {mprint(stderr, "dbg: " fmt, ##__VA_ARGS__);}
-#define pr_info(fmt, ...) \
-		if (info) {mprint(stdout, fmt, ##__VA_ARGS__);}
-#define pr_err(fmt, ...) \
-		if (1) {mprint(stderr, fmt, ##__VA_ARGS__);}
-
-static void mprint(FILE* stream, const char* fmt, ...)
-{
-	va_list args;
-	va_start(args, fmt);
-	vfprintf(stream, fmt, args);
-	va_end(args);
-}
-
-struct header {
-	uint32_t magic;
-	uint8_t rsvd[28];
-	uint64_t tree_offset;
-	uint64_t root_offset;
-	uint64_t digest_offset;
-	uint64_t key_offset;
-};
-enum {
-	HEADER_MAGIC = 0x494d4721,
-	HEADER_SIZE  = 64,
-};
-_Static_assert(sizeof(struct header) == HEADER_SIZE, "struct header size unexpected\n");
 
 struct section {
 	off64_t offset;
@@ -289,50 +243,6 @@ static void dump_container(const struct container* container)
 				container->header.offset, container->header.size,
 				key_type ? key_type : "unknown", EVP_PKEY_get_bits(container->pkey),
 				evp_pkey_to_hash(container->pkey), container->roothash);
-}
-
-static void u32tole(uint32_t in, uint8_t* buf)
-{
-	buf[0] = in & 0xff;
-	buf[1] = (in >> 8) & 0xff;
-	buf[2] = (in >> 16) & 0xff;
-	buf[3] = (in >> 24) & 0xff;
-}
-
-static uint32_t u32fromle(const uint8_t* buf)
-{
-	const uint32_t out =
-		buf[0]
-		| (buf[1] << 8)
-		| (buf[2] << 16)
-		| ((uint32_t) buf[3] << 24);
-	return out;
-}
-
-static void u64tole(uint64_t in, uint8_t* buf)
-{
-	buf[0] = in & 0xff;
-	buf[1] = (in >> 8) & 0xff;
-	buf[2] = (in >> 16) & 0xff;
-	buf[3] = (in >> 24) & 0xff;
-	buf[4] = (in >> 32) & 0xff;
-	buf[5] = (in >> 40) & 0xff;
-	buf[6] = (in >> 48) & 0xff;
-	buf[7] = (in >> 56) & 0xff;
-}
-
-static uint64_t u64fromle(const uint8_t* buf)
-{
-	const uint64_t out =
-		(uint64_t) buf[0]
-		| ((uint64_t) buf[1] << 8)
-		| ((uint64_t) buf[2] << 16)
-		| ((uint64_t) buf[3] << 24)
-		| ((uint64_t) buf[4] << 32)
-		| ((uint64_t) buf[5] << 40)
-		| ((uint64_t) buf[6] << 48)
-		| ((uint64_t) buf[7] << 56);
-	return out;
 }
 
 static int write_bytes(int fd, const uint8_t* buf, size_t size)
@@ -783,14 +693,7 @@ static int create_container_header(struct container* container, uint8_t* buf, si
 	hdr.key_offset = container->key.offset;
 	hdr.digest_offset = container->digest.offset;
 
-	/* write to buffer */
-	u32tole(hdr.magic, buf + offsetof(struct header, magic));
-	memcpy(buf + offsetof(struct header, rsvd), &hdr.rsvd, member_size(struct header, rsvd));
-	u64tole(hdr.tree_offset, buf + offsetof(struct header, tree_offset));
-	u64tole(hdr.root_offset, buf + offsetof(struct header, root_offset));
-	u64tole(hdr.digest_offset, buf + offsetof(struct header, digest_offset));
-	u64tole(hdr.key_offset, buf + offsetof(struct header, key_offset));
-	return 0;
+	return container_header_serialize(&hdr, buf, size);
 }
 
 /* return -1 if too large */
@@ -818,19 +721,10 @@ static int read_container_header(int fd, struct container* container)
 	if (r != 0)
 		return r;
 
-	/* populate hdr */
 	struct header hdr;
-	memset(&hdr, 0, sizeof(hdr));
-	hdr.magic = u32fromle(buf + offsetof(struct header, magic));
-	if (hdr.magic != HEADER_MAGIC) {
-		pr_dbg("hdr.magic 0x%" PRIx32 " not the expected 0x%" PRIx32 "\n", hdr.magic, HEADER_MAGIC)
-		return -ENOMSG; /* not of type container */
-	}
-	memcpy(&hdr.rsvd, buf + offsetof(struct header, rsvd), member_size(struct header, rsvd));
-	hdr.tree_offset = u64fromle(buf + offsetof(struct header, tree_offset));
-	hdr.root_offset = u64fromle(buf + offsetof(struct header, root_offset));
-	hdr.digest_offset = u64fromle(buf + offsetof(struct header, digest_offset));
-	hdr.key_offset = u64fromle(buf + offsetof(struct header, key_offset));
+	r = container_header_parse(&hdr, buf, HEADER_SIZE);
+	if (r != 0)
+		return r;
 
 	pr_dbg("hdr.tree_offset: 0x%" PRIx64 "\n", hdr.tree_offset);
 	pr_dbg("hdr.root_offset: 0x%" PRIx64 "\n", hdr.root_offset);
