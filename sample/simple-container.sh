@@ -185,7 +185,7 @@ while [ "$#" -gt 0 ]; do
 		shift # past argument
 		shift # past value
 		;;
-	-h/--help)
+	-h|--help)
 		print_usage
 		exit 1
 		;;
