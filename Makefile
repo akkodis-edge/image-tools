@@ -59,7 +59,7 @@ $(ALL_TARGETS_SYSTEMD): %: $(BUILD)/%
 # Disable implicit shells script rule
 %: %.sh
 
-$(BUILD)/container-util: $(BUILD)/container-util.o
+$(BUILD)/container-util: $(BUILD)/src/container-util.o
 	mkdir -p $(BUILD)
 	$(CC) -o $@ $^ $(LDFLAGS) -lcrypto -lcryptsetup
 
@@ -85,11 +85,11 @@ $(BUILD)/%.service: %.service.in
 		-e 's:@BINDIR@:${bindir}:g' \
 		$< > $@
 
-$(BUILD)/%.o: %.c
+$(BUILD)/src/%.o: src/%.c
 ifeq ($(USE_CLANG_TIDY), 1)
 	$(CLANG_TIDY) $< -- $(CFLAGS)
 endif
-	mkdir -p $(BUILD)
+	mkdir -p $(BUILD)/src
 	$(CC) $(CFLAGS) -c $< -o $@
 
 .PHONY: clean
