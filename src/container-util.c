@@ -13,15 +13,10 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <openssl/evp.h>
-#include <openssl/err.h>
-#include <openssl/x509.h>
-#include <openssl/decoder.h>
-#include <openssl/provider.h>
-#include <openssl/store.h>
-#include <openssl/rsa.h>
 #include "log.h"
 #include "header.h"
 #include "verity.h"
+#include "crypt.h"
 
 /* return number of elements in array */
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
@@ -66,62 +61,18 @@ static void destroy_container(struct container* container)
 	memset(container, 0, sizeof(*container));
 }
 
-static const char* evp_pkey_to_hash(const EVP_PKEY* pkey)
+static const char* hash_function(const EVP_PKEY* pkey)
 {
-	const int bits = EVP_PKEY_get_bits(pkey);
-	if (bits == 0) {
-		pr_err("key can not have 0 bits\n");
-		return "";
-	}
-
-	/* Select hash function based on key strength as recommended by NIST SP 800-57pt1r6:
-	 * Table 4. Security strengths of classical (non-quantum-resistant) asymmetric-key algorithms
-	 * Table 6. Maximum security strengths for hash functions, XOFs, and their applications
-	 */
-	int css = 0; /* css -> "classical security strength" as in non-quantum-resistant */
-
-	if (css == 0 && EVP_PKEY_is_a(pkey, "RSA")) {
-		if (bits >= 15360)
-			css = 256;
-		else if (bits >= 7680)
-			css = 192;
-		else if (bits >= 3072)
-			css = 128;
-		else if (bits >= 2024)
-			css = 112;
-		else
-			css = 80;
-
-	}
-	if (css == 0 && EVP_PKEY_is_a(pkey, "EC")) {
-		if (bits >= 512)
-			css = 256;
-		else if (bits >= 384)
-			css = 192;
-		else if (bits >= 256)
-			css = 128;
-		else if (bits >= 224)
-			css = 112;
-		else
-			css = 80;
-	}
-
-	if (css == 0) {
-		pr_err("could not determine hash function for key\n");
-		return "";
-	}
-
-	if (css >= 256)
-		return "SHA512";
-	else if (css >= 192)
-		return "SHA384";
-	else /* never drop below SHA256 */
-		return "SHA256";
+	const char *hash = crypt_pkey_hash_function(pkey);
+	if (hash == NULL)
+		return "UNSUPPORTED";
+	return hash;
 }
 
 static void dump_container(const struct container* container)
 {
 	const char* key_type = EVP_PKEY_get0_type_name(container->pkey);
+
 	printf("container:\n"
 			"  section   offset     size\n"
 			"  data:     %-10" PRIu64 " [%zu b]\n"
@@ -139,7 +90,7 @@ static void dump_container(const struct container* container)
 				container->digest.offset, container->digest.size,
 				container->header.offset, container->header.size,
 				key_type ? key_type : "unknown", EVP_PKEY_get_bits(container->pkey),
-				evp_pkey_to_hash(container->pkey), container->roothash);
+				hash_function(container->pkey), container->roothash);
 }
 
 static int write_bytes(int fd, const uint8_t* buf, size_t size)
@@ -214,25 +165,6 @@ static int pread_bytes(int fd, off64_t offset, uint8_t* buf, size_t bytes)
 	return read_bytes(fd, buf, bytes);
 }
 
-static int error_cb(const char* input, size_t len, void* priv)
-{
-	(void) priv;
-	(void) len;
-	printf("%s\n", input);
-	return 0;
-}
-
-static int parse_public_key(const uint8_t* data, size_t size, EVP_PKEY** pkey)
-{
-	if (size > LONG_MAX)
-		return -EINVAL;
-	const unsigned char *tmp = data;
-	*pkey = d2i_PUBKEY(NULL, &tmp, (long) size);
-	if (*pkey == NULL)
-		return -EPROTONOSUPPORT;
-	return 0;
-}
-
 /*
  * return 1 if equal
  *        0 if not equal
@@ -263,256 +195,47 @@ static int compare_pkey(const EVP_PKEY* lhs, const EVP_PKEY* rhs)
 	return r;
 }
 
-enum read_pkey_ctx_operations {
-	READ_PKEY_FORMAT_FILE    = 1 << 0,
-	READ_PKEY_FORMAT_PKCS11  = 1 << 1,
-	READ_PKEY_TYPE_PRIV      = 1 << 2,
-	READ_PKEY_TYPE_PUB       = 1 << 3,
-	READ_PKEY_TYPE_PAIR      = READ_PKEY_TYPE_PRIV | READ_PKEY_TYPE_PUB,
-	READ_PKEY_TYPE_MASK      = READ_PKEY_TYPE_PAIR,
-};
-
-struct read_pkey_ctx {
-	char *path;
-	char *pkcs11;
-	FILE *file;
-	OSSL_STORE_CTX *store;
-	int ops;
-	int done;
-	size_t pem_index;
-};
-
-static int read_pkey_ctx_create(struct read_pkey_ctx* ctx, const char* path, const char* pkcs11, int ops)
-{
-	memset(ctx, 0, sizeof(*ctx));
-
-	/* must search somewhere */
-	if (path == NULL && pkcs11 == NULL)
-		return -EINVAL;
-	/* must search for something */
-	if ((ops & (READ_PKEY_TYPE_PRIV | READ_PKEY_TYPE_PUB)) == 0)
-			return -EINVAL;
-	/* must search for one of */
-	if (is_set(ops, READ_PKEY_TYPE_PRIV) && is_set(ops, READ_PKEY_TYPE_PUB))
-		return -EINVAL;
-
-	ctx->ops = ops;
-	ctx->done = 0;
-	ctx->pem_index = 0;
-
-	/* Notify OSSL_STORE what we are looking for, required to avoid requiring pin for pubkeys.
-	 * This operation must be called before first OSSL_STORE_load() call. */
-	int pkcs11_expected = 0;
-	if (is_set(ctx->ops, READ_PKEY_TYPE_PUB))
-		pkcs11_expected = OSSL_STORE_INFO_PUBKEY;
-	if (is_set(ctx->ops, READ_PKEY_TYPE_PRIV))
-		pkcs11_expected = OSSL_STORE_INFO_PKEY;
-
-	int r = 0;
-
-	if (path != NULL) {
-		ctx->ops |= READ_PKEY_FORMAT_FILE;
-		ctx->path = (char*) path;
-		ctx->file = fopen(ctx->path, "r");
-		if (ctx->file == NULL) {
-			r = -errno;
-			pr_err("%s: fdopen [%d] %s\n", ctx->path, -r, strerror(-r));
-			goto error_exit;
-		}
-	}
-
-	if (pkcs11 != NULL) {
-		ctx->ops |= READ_PKEY_FORMAT_PKCS11;
-		ctx->pkcs11 = (char*) pkcs11;
-
-		/* Ensure openssl errors are our errors */
-		ERR_clear_error();
-
-		ctx->store = OSSL_STORE_open(ctx->pkcs11, NULL, NULL, NULL, NULL);
-		if (ctx->store == NULL) {
-			pr_err("pkcs11 OSSL_STORE_open failed\n");
-			ERR_print_errors_cb(error_cb, NULL);
-			r = -EFAULT;
-			goto error_exit;
-		}
-		r = OSSL_STORE_expect(ctx->store, pkcs11_expected);
-		if (r != 1) {
-			pr_err("pkcs11 OSSL_STORE_expect failed\n");
-			ERR_print_errors_cb(error_cb, NULL);
-			r = -EFAULT;
-			goto error_exit;
-		}
-	}
-
-	return 0;
-error_exit:
-	if(ctx->file != NULL)
-		fclose(ctx->file);
-	ctx->file = NULL;
-	/* OSSL_STORE_close(ctx->store);
-	* will cause a segmentation fault on OSSL_PROVIDER_unload(pkcs11_provider).
-	* Is this close method redundant? */
-	return r;
-}
-
-static int read_pkey_ctx_free(struct read_pkey_ctx* ctx)
-{
-	if (ctx == NULL)
-		return 0;
-	if (ctx->file != NULL)
-		fclose(ctx->file);
-	ctx->file = NULL;
-
-	/* OSSL_STORE_close(ctx->store);
-	* will cause a segmentation fault on OSSL_PROVIDER_unload(pkcs11_provider).
-	* Is this close method redundant? */
-
-	return 0;
-}
-
-static const char* read_pkey_ctx_key_type(int ops)
-{
-	switch (ops & READ_PKEY_TYPE_MASK) {
-	case READ_PKEY_TYPE_PUB:
-		return "PUB";
-	case READ_PKEY_TYPE_PRIV:
-		return "PRIV";
-	case READ_PKEY_TYPE_PAIR:
-		return "PAIR";
-	default:
-		return "UNKNOWN";
-	}
-}
-
-/* Return PKEY from ctx, caller responsible of freeing pkey.
- * path should NOT be freed.
- *
- * Return 0 if key available, 1 if no further processing possible
- * or negative errno for error. */
-static int read_pkey(struct read_pkey_ctx* ctx, EVP_PKEY** pkey, char** path)
-{
-	if ((ctx == NULL) || (pkey == NULL) || (*pkey != NULL))
-		return -EINVAL;
-
-	int r = 0;
-
-	if (is_set(ctx->ops, READ_PKEY_FORMAT_FILE) && !is_set(ctx->done, READ_PKEY_FORMAT_FILE)) {
-		/* Ensure openssl errors are our errors */
-		ERR_clear_error();
-
-		/* check what to read */
-		int selection = 0;
-		switch (ctx->ops & READ_PKEY_TYPE_MASK) {
-		case READ_PKEY_TYPE_PUB:
-			selection = OSSL_KEYMGMT_SELECT_PUBLIC_KEY; break;
-		case READ_PKEY_TYPE_PRIV:
-			selection = OSSL_KEYMGMT_SELECT_PRIVATE_KEY; break;
-		case READ_PKEY_TYPE_PAIR:
-			selection = OSSL_KEYMGMT_SELECT_KEYPAIR; break;
-		}
-
-		OSSL_DECODER_CTX *dctx = OSSL_DECODER_CTX_new_for_pkey(pkey, NULL, NULL, NULL,
-				selection, NULL, NULL);
-		if (dctx == NULL) {
-			pr_err("OSSL_DECODER_CTX_new_for_pkey failed\n");
-			ERR_print_errors_cb(error_cb, NULL);
-			return -EFAULT;
-		}
-		if (OSSL_DECODER_CTX_get_num_decoders(dctx) >= 1) {
-			r = OSSL_DECODER_from_fp(dctx, ctx->file);
-			if (r == 0)
-				ERR_print_errors_cb(error_cb, NULL);
-			r = r == 1 ? 0 : -EBADF;
-		}
-		else {
-			pr_err("OSSL_DECODER_CTX_new_for_pkey no decoders found\n");
-			ERR_print_errors_cb(error_cb, NULL);
-			r = -EFAULT;
-		}
-		OSSL_DECODER_CTX_free(dctx);
-		if (r == 0) {
-			pr_dbg("%s[%zu][%s]: %s-%d\n", ctx->path, ctx->pem_index, read_pkey_ctx_key_type(ctx->ops),
-					EVP_PKEY_get0_type_name(*pkey), EVP_PKEY_get_bits(*pkey));
-			*path = ctx->path;
-			ctx->pem_index++;
-			return 0;
-		}
-		/* no further keys available */
-		pr_dbg("%s[%zu]: [%d]: %s\n", ctx->path, ctx->pem_index, -r, strerror(-r));
-		ctx->done |= READ_PKEY_FORMAT_FILE;
-	}
-
-	/* READ pkcs11 if requested */
-	if (is_set(ctx->ops, READ_PKEY_FORMAT_PKCS11) && !is_set(ctx->done, READ_PKEY_FORMAT_PKCS11)) {
-		/* Search for key in store */
-		OSSL_STORE_INFO *info = NULL;
-		while ((info = OSSL_STORE_load(ctx->store)) != NULL) {
-			EVP_PKEY* key = NULL;
-			if (key == NULL && is_set(ctx->ops, READ_PKEY_TYPE_PUB))
-				key = OSSL_STORE_INFO_get0_PUBKEY(info);
-			if (key == NULL && is_set(ctx->ops, READ_PKEY_TYPE_PRIV))
-				key = OSSL_STORE_INFO_get0_PKEY(info);
-			if (key != NULL)
-				r = EVP_PKEY_up_ref(key);
-			OSSL_STORE_INFO_free(info);
-			if (key == NULL)
-				continue;
-			if (r != 1) {
-				pr_err("pkcs11 failed retrieving key\n");
-				EVP_PKEY_free(key);
-				return -EFAULT;
-			}
-			*pkey = key;
-			*path = "pkcs11";
-			pr_dbg("pkcs11[%s]: %s-%d\n", read_pkey_ctx_key_type(ctx->ops), EVP_PKEY_get0_type_name(*pkey), EVP_PKEY_get_bits(*pkey));
-			return 0;
-		}
-
-		/* pkcs11 store empty */
-		ctx->done |= READ_PKEY_FORMAT_PKCS11;
-	}
-
-	return 1;
-}
-
 static int read_private_key(const char* key_path, const char* key_pkcs11, EVP_PKEY** pkey)
 {
-	struct read_pkey_ctx ctx;
-	int r = read_pkey_ctx_create(&ctx, key_path, key_pkcs11, READ_PKEY_TYPE_PRIV);
+	struct crypt_read_pkey_ctx *ctx = NULL;
+	int r = crypt_read_pkey_ctx_create(&ctx, key_path, key_pkcs11, CRYPT_READ_PRIV);
 	if (r != 0)
 		return r;
 
 	char *name = NULL;
-	r = read_pkey(&ctx, pkey, &name);
-	read_pkey_ctx_free(&ctx);
+	r = crypt_read_pkey(ctx, pkey, &name);
+	crypt_read_pkey_ctx_free(ctx);
 	if (r > 0)
 		r = -EBADF;
+	free(name);
 	return r;
 }
 
 static int read_and_match_public_key(const char* key_path, const char* key_pkcs11, const EVP_PKEY* pkey)
 {
-	struct read_pkey_ctx ctx;
-	int r = read_pkey_ctx_create(&ctx, key_path, key_pkcs11, READ_PKEY_TYPE_PUB);
+	struct crypt_read_pkey_ctx *ctx = NULL;
+	int r = crypt_read_pkey_ctx_create(&ctx, key_path, key_pkcs11, CRYPT_READ_PUB);
 	if (r != 0)
 		return r;
 
 	EVP_PKEY *compare = NULL;
 	char *name = NULL;
-	while ((r = read_pkey(&ctx, &compare, &name)) == 0) {
+	while ((r = crypt_read_pkey(ctx, &compare, &name)) == 0) {
 		const int result = compare_pkey(compare, pkey);
 		EVP_PKEY_free(compare);
 		compare = NULL;
 		if (result == 1) {
 			r = 1;
 			pr_info("%s: pubkey used for validation\n", name);
+			free(name);
 			goto exit;
 		}
+		free(name);
 	}
 	if (r > 0)
 		r = 0;
 exit:
-	read_pkey_ctx_free(&ctx);
+crypt_read_pkey_ctx_free(ctx);
 	return r;
 }
 
@@ -653,150 +376,6 @@ static int read_container_header(int fd, struct container* container)
 	return 0;
 }
 
-static int create_digest(const uint8_t* data, size_t data_size, uint8_t** digest, size_t* digest_size, EVP_PKEY* pkey)
-{
-	uint8_t *digest_buf = NULL;
-	size_t digest_buf_size = 0;
-	EVP_MD_CTX *ctx = NULL;
-	EVP_MD *algo = NULL;
-	EVP_PKEY_CTX *pctx = NULL;
-	int r = 0;
-
-	/* Ensure openssl errors are our errors */
-	ERR_clear_error();
-
-	/* prepare validation context */
-	ctx = EVP_MD_CTX_new();
-	if (ctx == NULL) {
-		pr_err("failed creating validation context\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -ENOSYS;
-		goto exit;
-	}
-
-	/* Determine hash method */
-	algo = EVP_MD_fetch(NULL, evp_pkey_to_hash(pkey), NULL);
-	if (algo == NULL) {
-		pr_err("failed fetching digest algorithm\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -ENOSYS;
-		goto exit;
-	}
-
-	/* initialize */
-	if (EVP_DigestSignInit(ctx, &pctx, algo, NULL, pkey) != 1) {
-		pr_err("failed initializing digest verification\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -ENOSYS;
-		goto exit;
-	}
-
-	if (EVP_PKEY_is_a(pkey, "RSA")) {
-		/* Ensure PKCS#1 v1.5 padding for RSA keys */
-		if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING) < 1) {
-			pr_err("failed setting RSA padding to PKCS#1 v1.5\n");
-			r = -EFAULT;
-			goto exit;
-		}
-	}
-
-	/* check digest size */
-	if (EVP_DigestSign(ctx, NULL, &digest_buf_size, data, data_size) != 1) {
-		pr_err("failed calculating digest size\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -ENOSYS;
-		goto exit;
-	}
-
-	/* Allocate */
-	digest_buf = malloc(digest_buf_size);
-	if (digest_buf == NULL) {
-		r = -ENOMEM;
-		goto exit;
-	}
-
-	/* sign digest */
-	if (EVP_DigestSign(ctx, digest_buf, &digest_buf_size, data, data_size) != 1) {
-		pr_err("failed signing digest\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -ENOSYS;
-		goto exit;
-	}
-
-	*digest = digest_buf;
-	digest_buf = NULL;
-	*digest_size = digest_buf_size;
-
-	r = 0;
-exit:
-	if (digest_buf != NULL)
-		free(digest_buf);
-	EVP_MD_CTX_free(ctx);
-	EVP_MD_free(algo);
-	return r;
-}
-
-/* Return 1 for valid, 0 for invalid, else negative errno for error */
-static int verify_digest(const uint8_t* data_buf, size_t data_size, const uint8_t* digest_buf, size_t digest_size, EVP_PKEY* pkey)
-{
-	EVP_MD_CTX *ctx = NULL;
-	EVP_MD *algo = NULL;
-	EVP_PKEY_CTX *pctx = NULL;
-
-	/* Ensure openssl errors are our errors */
-	ERR_clear_error();
-
-	int r = 0;
-
-	/* prepare validation context */
-	ctx = EVP_MD_CTX_new();
-	if (ctx == NULL) {
-		pr_dbg("failed creating validation context\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -ENOSYS;
-		goto exit;
-	}
-
-	/* Determine hash method  */
-	algo = EVP_MD_fetch(NULL, evp_pkey_to_hash(pkey), NULL);
-	if (algo == NULL) {
-		pr_err("failed fetching digest algorithm\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -ENOSYS;
-		goto exit;
-	}
-
-	/* initialize */
-	if (EVP_DigestVerifyInit(ctx, &pctx, algo, NULL, pkey) != 1) {
-		pr_dbg("failed initializing digest verification\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -ENOSYS;
-		goto exit;
-	}
-
-	if (EVP_PKEY_is_a(pkey, "RSA")) {
-		/* Ensure PKCS#1 v1.5 padding for RSA keys */
-		if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING) < 1) {
-			pr_err("failed setting RSA padding to PKCS#1 v1.5\n");
-			r = -EFAULT;
-			goto exit;
-		}
-	}
-
-	/* verify */
-	r = EVP_DigestVerify(ctx, digest_buf, digest_size, data_buf, data_size);
-	if (r != 0 && r != 1) {
-		pr_dbg("failed verifying digest\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -ENOSYS;
-	}
-
-exit:
-	EVP_MD_CTX_free(ctx);
-	EVP_MD_free(algo);
-	return r;
-}
-
 struct region {
 	off64_t offset;
 	size_t size;
@@ -851,14 +430,14 @@ static int read_container(struct container* container, int fd)
 	}
 
 	/* parse pubkey */
-	r = parse_public_key(pubkey, container->key.size, &container->pkey);
+	r = crypt_parse_public_key(pubkey, container->key.size, &container->pkey);
 	if (r != 0) {
 		pr_dbg("container - pubkey: [%d]: %s\n", -r, strerror(-r));
 		goto exit;
 	}
 
 	/* validate roothash signature */
-	r = verify_digest((uint8_t*) container->roothash, container->root.size, digest, container->digest.size, container->pkey);
+	r = crypt_digest_verity((uint8_t*) container->roothash, container->root.size, digest, container->digest.size, container->pkey);
 	switch (r) {
 	case 1:
 		container->opt |= CONTAINER_VALID;
@@ -880,8 +459,6 @@ exit:
 		free(pubkey);
 	return r;
 }
-
-
 
 static int cat_container(const struct container* container, int fd, int treefd, uint8_t* roothash, uint8_t* digest, uint8_t* pubkey, uint8_t* header)
 {
@@ -991,22 +568,17 @@ static int write_container(int fd, const char* path, EVP_PKEY* pkey, struct cont
 	/* Sign roothash */
 	container->root.size = strlen(container->roothash);
 	size_t digest_size = 0;
-	r = create_digest((uint8_t*) container->roothash, container->root.size, &digest, &digest_size, pkey);
+	r = crypt_digest_create((uint8_t*) container->roothash, container->root.size, &digest, &digest_size, pkey);
 	if (r != 0)
 		goto exit;
 	container->digest.size = digest_size;
 
 	/* retrieve pubkey */
-	/* Ensure openssl errors are our errors */
-	ERR_clear_error();
-	const int pubkey_bytes = i2d_PUBKEY(pkey, (unsigned char**) &pubkey_buf);
-	if (pubkey_bytes < 0) {
-		pr_err("failed extracting pubkey\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -ENOSYS;
+	r = crypt_serialize_public_key(&pubkey_buf, &container->key.size, pkey);
+	if (r != 0) {
+		pr_err("failed extracting pubkey [%d]: %s\n", -r, strerror(-r));
 		goto exit;
 	}
-	container->key.size = (size_t) pubkey_bytes;
 
 	/* create header */
 	container->header.size = HEADER_SIZE;
@@ -1239,35 +811,22 @@ int main(int argc, char *argv[])
 		return EINVAL;
 	}
 
-	/* If pkcs11 provider is required then default provider must be explicitly
-	 * loaded as well.
-	 * Always load default provider and load pkcs11 if required.
-	 * The providers must be loaded before using the library. */
-
-	/* Ensure openssl errors are our errors */
-	ERR_clear_error();
-
-	OSSL_PROVIDER *provider_default = OSSL_PROVIDER_load(NULL, "default");
-	if (provider_default == NULL) {
-		pr_err("Failed loading openssl default provider\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		return EFAULT;
-	}
-	OSSL_PROVIDER *provider_pkcs11 = NULL;
-	if ((cfg.pubkey_pkcs11 != NULL) || (cfg.key_pkcs11 != NULL)) {
-		provider_pkcs11 = OSSL_PROVIDER_load(NULL, "pkcs11");
-		if (provider_pkcs11 == NULL) {
-			pr_err("Failed loading openssl pkcs11 provider\n");
-			ERR_print_errors_cb(error_cb, NULL);
-			return EFAULT;
-		}
-	}
-
+	struct crypt_ctx *cctx = NULL;
 	struct container container;
 	memset(&container, 0, sizeof(container));
 	EVP_PKEY *signing_key = NULL;
-	int r = 0;
 	int filefd = -1;
+	int r = 0;
+
+	/* crypt context must be loaded before any crypt or openssl calls */
+	int crypt_flags = 0;
+	if (cfg.pubkey_pkcs11 != NULL || cfg.key_pkcs11 != NULL)
+		crypt_flags |= CRYPT_CTX_INIT_PKCS11;
+	r = crypt_ctx_create(&cctx, crypt_flags);
+	if (r != 0) {
+		pr_err("Failed loading cryptographic context: [%d] %s\n", -r, strerror(-r));
+		goto exit;
+	}
 
 	/* open FILE and validate as container */
 	filefd = open(cfg.filepath, O_RDONLY | O_CLOEXEC);
@@ -1413,8 +972,7 @@ exit:
 	if (filefd >= 0)
 		close(filefd);
 	destroy_container(&container);
-	OSSL_PROVIDER_unload(provider_default);
-	OSSL_PROVIDER_unload(provider_pkcs11);
+	crypt_ctx_free(cctx);
 	EVP_PKEY_free(signing_key);
 	pr_dbg("exit code: [%d]: %s\n", -r, strerror(-r));
 	return -r;

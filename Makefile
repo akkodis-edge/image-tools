@@ -59,7 +59,7 @@ $(ALL_TARGETS_SYSTEMD): %: $(BUILD)/%
 # Disable implicit shells script rule
 %: %.sh
 
-$(BUILD)/container-util: $(addprefix $(BUILD)/src/,container-util.o log.o header.o verity.o)
+$(BUILD)/container-util: $(addprefix $(BUILD)/src/,container-util.o log.o header.o verity.o crypt.o)
 	mkdir -p $(BUILD)
 	$(CC) -o $@ $^ $(LDFLAGS) -lcrypto -lcryptsetup
 
