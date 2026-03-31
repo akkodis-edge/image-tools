@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 #ifndef CRYPT__H__
 #define CRYPT__H__
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 #ifndef LOG__H__
 #define LOG__H__
 #include <stdio.h>

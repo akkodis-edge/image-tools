@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //NOLINTNEXTLINE(bugprone-reserved-identifier)
 #define _LARGEFILE64_SOURCE /* For lseek64() */
 #include <stdlib.h>

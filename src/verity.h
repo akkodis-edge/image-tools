@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 #ifndef VERITY__H__
 #define VERITY__H__
 
