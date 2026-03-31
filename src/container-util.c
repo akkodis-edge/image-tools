@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-
-//NOLINTNEXTLINE(bugprone-reserved-identifier)
-#define _LARGEFILE64_SOURCE /* For lseek64() */
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>
-#include <inttypes.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -17,153 +13,11 @@
 #include "header.h"
 #include "verity.h"
 #include "crypt.h"
-
-/* return number of elements in array */
-#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#include "container.h"
 
 /* xstr() will return string literal from symbol content */
 #define xstr(a) str(a)
 #define str(a) #a
-
-/* check bit-flag */
-static inline int is_set(int flag, int mask)
-{
-	return (flag & mask) == mask;
-}
-
-struct section {
-	off64_t offset;
-	size_t size;
-};
-
-enum container_flags {
-	CONTAINER_NONE     = 0,
-	CONTAINER_VALID    = 1 << 0, /* container header validated */
-};
-
-struct container {
-	struct section data;
-	struct section tree;
-	struct section root;
-	struct section digest;
-	struct section key;
-	struct section header;
-	char *roothash;
-	EVP_PKEY *pkey;
-	int opt;
-};
-
-static void destroy_container(struct container* container)
-{
-	EVP_PKEY_free(container->pkey);
-	if (container->roothash != NULL)
-		free(container->roothash);
-	memset(container, 0, sizeof(*container));
-}
-
-static const char* hash_function(const EVP_PKEY* pkey)
-{
-	const char *hash = crypt_pkey_hash_function(pkey);
-	if (hash == NULL)
-		return "UNSUPPORTED";
-	return hash;
-}
-
-static void dump_container(const struct container* container)
-{
-	const char* key_type = EVP_PKEY_get0_type_name(container->pkey);
-
-	printf("container:\n"
-			"  section   offset     size\n"
-			"  data:     %-10" PRIu64 " [%zu b]\n"
-			"  tree:     %-10" PRIu64 " [%zu b]\n"
-			"  root:     %-10" PRIu64 " [%zu b]\n"
-			"  pubkey:   %-10" PRIu64 " [%zu b]\n"
-			"  digest:   %-10" PRIu64 " [%zu b]\n"
-			"  header:   %-10" PRIu64 " [%zu b]\n"
-			"  key type: %s-%d + %s\n"
-			"  roothash: %s\n",
-				container->data.offset, container->data.size,
-				container->tree.offset, container->tree.size,
-				container->root.offset, container->root.size,
-				container->key.offset, container->key.size,
-				container->digest.offset, container->digest.size,
-				container->header.offset, container->header.size,
-				key_type ? key_type : "unknown", EVP_PKEY_get_bits(container->pkey),
-				hash_function(container->pkey), container->roothash);
-}
-
-static int write_bytes(int fd, const uint8_t* buf, size_t size)
-{
-	if (size > SSIZE_MAX)
-		return -EINVAL;
-	ssize_t bytes_remaining = (ssize_t) size;
-	uint8_t *tmp = (uint8_t*) buf;
-	while(bytes_remaining > 0) {
-		ssize_t bytes = write(fd, tmp, bytes_remaining);
-		if (bytes < 0)
-			return -errno;
-		if (bytes < 1 || bytes > bytes_remaining)
-			return -EIO;
-		bytes_remaining -= bytes;
-		tmp += bytes;
-	}
-	return 0;
-}
-
-static int pwrite_bytes(int fd, off64_t offset, const uint8_t* buf, size_t bytes)
-{
-	const off64_t pos = lseek64(fd, offset, SEEK_SET);
-	if (pos < 0)
-		return -errno;
-	return write_bytes(fd, buf, bytes);
-}
-
-static int padto_multiple_of(int fd, off64_t multiple)
-{
-	if (multiple < 1)
-		return -EINVAL;
-	const off64_t size = lseek64(fd, 0, SEEK_END);
-	if (size < 0)
-		return -errno;
-	const off64_t modulus = -size % multiple;
-	if (modulus == 0)
-		return 0;
-	const ssize_t remaining = (ssize_t) multiple + modulus;
-	pr_info("WARNING: padding FILE from %lld by %lld to %lld\n", size, remaining, size + remaining);
-	uint8_t *buf = malloc(remaining);
-	if (buf == NULL)
-		return -ENOMEM;
-	memset(buf, 0, remaining);
-	int r = write_bytes(fd, buf, remaining);
-	free(buf);
-	return r;
-}
-
-static int read_bytes(int fd, uint8_t* buf, size_t size)
-{
-	if (size > SSIZE_MAX)
-		return -EINVAL;
-	ssize_t bytes_remaining = (ssize_t) size;
-	while(bytes_remaining > 0) {
-		ssize_t bytes = read(fd, buf, bytes_remaining);
-		if (bytes < 0)
-			return -errno;
-		if (bytes < 1 || bytes > bytes_remaining)
-			return -EIO;
-		bytes_remaining -= bytes;
-		buf += bytes;
-	}
-	return 0;
-}
-
-static int pread_bytes(int fd, off64_t offset, uint8_t* buf, size_t bytes)
-{
-	const off64_t pos = lseek64(fd, offset, SEEK_SET);
-	if (pos < 0)
-		return -errno;
-	return read_bytes(fd, buf, bytes);
-}
 
 /*
  * return 1 if equal
@@ -281,340 +135,6 @@ static int match_pubkey(const char* pubkey, const char* pubkey_dir, const char* 
 	}
 
 	return -EBADF;
-}
-
-/* buf must be of size HEADER_SIZE */
-static int create_container_header(struct container* container, uint8_t* buf, size_t size)
-{
-	if ((size != HEADER_SIZE) || (buf == NULL) || (container == NULL))
-		return -EINVAL;
-
-	/* validate size and fill in offsets with no overlap */
-	struct section *sections[] = {
-		&container->data, &container->tree, &container->root,
-		&container->digest, &container->key, &container->header
-	};
-	off64_t previous_end = 0;
-	for (size_t i = 0; i < ARRAY_SIZE(sections); ++i) {
-		if ((sections[i]->size == 0)
-			|| (sections[i]->size > INT64_MAX)
-			|| ((INT64_MAX - sections[i]->size) < (size_t) previous_end))
-			return -EINVAL;
-		sections[i]->offset = previous_end;
-		previous_end = sections[i]->offset + (off64_t) sections[i]->size;
-	}
-
-	/* prepare header */
-	struct header hdr;
-	memset(&hdr, 0, sizeof(hdr));
-	hdr.magic = HEADER_MAGIC;
-	hdr.tree_offset = container->tree.offset;
-	hdr.root_offset = container->root.offset;
-	hdr.key_offset = container->key.offset;
-	hdr.digest_offset = container->digest.offset;
-
-	return container_header_serialize(&hdr, buf, size);
-}
-
-/* return -1 if too large */
-static off64_t size_to_off64(size_t input)
-{
-	return input > INT64_MAX ? -1 : (off64_t) input;
-}
-
-static int read_container_header(int fd, struct container* container)
-{
-	/* Reposition to start of header */
-	const off64_t header_pos = lseek64(fd, -HEADER_SIZE, SEEK_END);
-	if (header_pos < 0) {
-		if (errno == EINVAL) {
-			return -ENOMSG; /* not of type container */
-		}
-		else {
-			return -errno;
-		}
-	}
-
-	/* read in header */
-	uint8_t buf[HEADER_SIZE];
-	int r = read_bytes(fd, buf, HEADER_SIZE);
-	if (r != 0)
-		return r;
-
-	struct header hdr;
-	r = container_header_parse(&hdr, buf, HEADER_SIZE);
-	if (r != 0)
-		return r;
-
-	pr_dbg("hdr.tree_offset: 0x%" PRIx64 "\n", hdr.tree_offset);
-	pr_dbg("hdr.root_offset: 0x%" PRIx64 "\n", hdr.root_offset);
-	pr_dbg("hdr.digest_offset: 0x%" PRIx64 "\n", hdr.digest_offset);
-	pr_dbg("hdr.key_offset: 0x%" PRIx64 "\n", hdr.key_offset);
-
-	container->data.offset = 0;
-	container->tree.offset = size_to_off64(hdr.tree_offset);
-	container->root.offset = size_to_off64(hdr.root_offset);
-	container->digest.offset = size_to_off64(hdr.digest_offset);
-	container->key.offset = size_to_off64(hdr.key_offset);
-	container->header.offset = header_pos;
-
-	/* Calculate and validate sections sizes with no overlap */
-	struct section *sections[] = {
-		&container->header, &container->key, &container->digest,
-		&container->root, &container->tree, &container->data
-	};
-
-	off64_t previous_offset = (INT64_MAX - header_pos) > HEADER_SIZE ? header_pos + HEADER_SIZE : 0;
-	for (size_t i = 0; i < ARRAY_SIZE(sections); ++i) {
-		if ((sections[i]->offset < 0)
-			|| (sections[i]->offset >= previous_offset))
-			return -ENOMSG;
-		sections[i]->size = previous_offset - sections[i]->offset;
-		previous_offset = sections[i]->offset;
-	}
-
-	return 0;
-}
-
-struct region {
-	off64_t offset;
-	size_t size;
-	size_t extra;
-	uint8_t **data;
-};
-
-static int read_container(struct container* container, int fd)
-{
-	/* read header */
-	int r = read_container_header(fd, container);
-	switch (r) {
-	case 0:
-		break;
-	case -ENOMSG:
-		container->opt = CONTAINER_NONE;
-		return 0;
-		break;
-	default:
-		pr_dbg("container - invalid header: [%d]: %s\n", -r, strerror(-r));
-		return r;
-	}
-
-	uint8_t *digest = NULL;
-	uint8_t *pubkey = NULL;
-
-	/* allocate and read metadata */
-	const struct region regions[] = {
-			{container->key.offset, container->key.size, 0, &pubkey},
-			{container->digest.offset, container->digest.size, 0, &digest},
-			/** allocate an extra byte for null-terminator, calloc ensure '\0' at end */
-			{container->root.offset, container->root.size, 1, (uint8_t**) &container->roothash},
-	};
-	for (size_t i = 0; i < ARRAY_SIZE(regions); ++i) {
-		/* check for overflow */
-		if ((SIZE_MAX - regions[i].size) < regions[i].extra) {
-			r = -EINVAL;
-			goto exit;
-		}
-		// Following error looks like false positive and thus ignored.
-		//NOLINTNEXTLINE(clang-analyzer-optin.portability.UnixAPI)
-		*(regions[i].data) = calloc(1, regions[i].size + regions[i].extra);
-		if (*(regions[i].data) == NULL) {
-			r = -ENOMEM;
-			goto exit;
-		}
-		r = pread_bytes(fd, regions[i].offset, *(regions[i].data), regions[i].size);
-		if (r != 0) {
-			pr_err("failed reading from FILE: [%d] %s\n", -r, strerror(-r));
-			goto exit;
-		}
-	}
-
-	/* parse pubkey */
-	r = crypt_parse_public_key(pubkey, container->key.size, &container->pkey);
-	if (r != 0) {
-		pr_dbg("container - pubkey: [%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
-
-	/* validate roothash signature */
-	r = crypt_digest_verity((uint8_t*) container->roothash, container->root.size, digest, container->digest.size, container->pkey);
-	switch (r) {
-	case 1:
-		container->opt |= CONTAINER_VALID;
-		pr_dbg("container - valid\n");
-		break;
-	case 0:
-		container->opt &= ~CONTAINER_VALID;
-		pr_dbg("container - invalid signature\n");
-		break;
-	default:
-		goto exit;
-	}
-
-	r = 0;
-exit:
-	if (digest != NULL)
-		free(digest);
-	if (pubkey != NULL)
-		free(pubkey);
-	return r;
-}
-
-static int cat_container(const struct container* container, int fd, int treefd, uint8_t* roothash, uint8_t* digest, uint8_t* pubkey, uint8_t* header)
-{
-	int r = 0;
-	uint8_t *buf = NULL;
-
-	/* position output at end of file */
-	if (lseek64(fd, 0, SEEK_END) < 0) {
-		r = -errno;
-		pr_err("failed seeking file [%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
-
-	/* position tree at start of file */
-	if (lseek64(treefd, 0, SEEK_SET) < 0) {
-		r = -errno;
-		pr_err("failed seeking tree [%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
-
-	/* write tree to output */
-	ssize_t bytes = 0;
-	const size_t buf_size = 4096;
-	buf = malloc(buf_size);
-	if (buf == NULL) {
-		r = -ENOMEM;
-		goto exit;
-	}
-	while ((bytes = read(treefd, buf, buf_size)) > 0 ) {
-		r = write_bytes(fd, buf, bytes);
-		if (r != 0) {
-			pr_err("failed writing to file: [%d] %s\n", -r, strerror(-r));
-			goto exit;
-		}
-	}
-	if (bytes < 0) {
-		r = -errno;
-		pr_err("failed reading tree [%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
-
-	/* write metadata */
-	const struct region regions[] = {
-			{container->root.offset, container->root.size, 0, &roothash},
-			{container->digest.offset, container->digest.size, 0, &digest},
-			{container->key.offset, container->key.size, 0, &pubkey},
-			{container->header.offset, container->header.size, 0, &header},
-	};
-
-	for (size_t i = 0; i < ARRAY_SIZE(regions); ++i) {
-		r = pwrite_bytes(fd, regions[i].offset, *(regions[i].data), regions[i].size);
-		if (r != 0) {
-			pr_err("failed writing to FILE: [%d] %s\n", -r, strerror(-r));
-			goto exit;
-		}
-	}
-
-	r = 0;
-exit:
-	if (buf != NULL)
-		free(buf);
-	return r;
-}
-
-static int write_container(int fd, const char* path, EVP_PKEY* pkey, struct container* container)
-{
-	char tmppath[] = "/tmp/ctutil-XXXXXX";
-	uint8_t *pubkey_buf = NULL;
-	uint8_t *digest = NULL;
-	int r = 0;
-	int tmpfd = -1;
-
-	/* fd size must be padded to multiples of 4096 */
-	r = padto_multiple_of(fd, 4096);
-	if (r != 0) {
-		pr_err("%s: failed padding: [%d]: %s\n", path, -r, strerror(-r));
-		goto exit;
-	}
-
-	/* create temp-file for hash tree output */
-	tmpfd = mkostemp(tmppath, O_CLOEXEC);
-	if (tmpfd < 0) {
-		r = -errno;
-		pr_err("mktmp: [%d] %s\n", -r, strerror(-r));
-		return r;
-	}
-
-	/* verity create */
-	r = verity_create(path, tmppath, &container->roothash);
-	if (r != 0)
-		goto exit;
-	const off64_t data_size = lseek64(fd, 0, SEEK_END);
-	if (data_size < 0) {
-		r = -errno;
-		pr_err("%s: failed getting data size [%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
-	container->data.size = (size_t) data_size;
-	const off64_t tree_size = lseek64(tmpfd, 0, SEEK_END);
-	if (tree_size < 0) {
-		r = -errno;
-		pr_err("%s: failed getting tree size [%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
-	container->tree.size = (size_t) tree_size;
-
-	/* Sign roothash */
-	container->root.size = strlen(container->roothash);
-	size_t digest_size = 0;
-	r = crypt_digest_create((uint8_t*) container->roothash, container->root.size, &digest, &digest_size, pkey);
-	if (r != 0)
-		goto exit;
-	container->digest.size = digest_size;
-
-	/* retrieve pubkey */
-	r = crypt_serialize_public_key(&pubkey_buf, &container->key.size, pkey);
-	if (r != 0) {
-		pr_err("failed extracting pubkey [%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
-
-	/* create header */
-	container->header.size = HEADER_SIZE;
-	uint8_t header_buf[HEADER_SIZE];
-	r = create_container_header(container, header_buf, container->header.size);
-	if (r != 0) {
-		pr_err("failed creating header: %[%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
-
-	/* concatenate parts */
-	r = cat_container(container, fd, tmpfd, (uint8_t*) container->roothash, digest, pubkey_buf, header_buf);
-	if (r != 0) {
-		pr_err("failed assembling container: %[%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
-
-	/* add signing key to container if needed */
-	r = EVP_PKEY_up_ref(pkey);
-	if (r != 1) {
-		r = -EFAULT;
-		pr_err("failed increment private key ref count\n");
-		goto exit;
-	}
-	container->pkey = pkey;
-
-	r = 0;
-exit:
-	if (unlink(tmppath) != 0)
-		pr_info("failed removing tmpfile: %s\n", tmppath);
-	close(tmpfd);
-	if (digest != NULL)
-		free(digest);
-	if (pubkey_buf != NULL)
-		free(pubkey_buf);
-	return r;
 }
 
 static void print_usage(void)
@@ -811,11 +331,20 @@ int main(int argc, char *argv[])
 		return EINVAL;
 	}
 
+	if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
+		if ((cfg.key_path == NULL) && (cfg.key_pkcs11 == NULL)) {
+			pr_err("Missing key --keyfile or --key-pkcs11 for --create\n");
+			return EINVAL;
+		}
+		if ((cfg.key_path != NULL) && (cfg.key_pkcs11 != NULL)) {
+			pr_err("--keyfile and --key-pkcs11 are mutually exclusive\n");
+			return EINVAL;
+		}
+	}
+
 	struct crypt_ctx *cctx = NULL;
-	struct container container;
-	memset(&container, 0, sizeof(container));
+	struct container *container;
 	EVP_PKEY *signing_key = NULL;
-	int filefd = -1;
 	int r = 0;
 
 	/* crypt context must be loaded before any crypt or openssl calls */
@@ -828,29 +357,61 @@ int main(int argc, char *argv[])
 		goto exit;
 	}
 
-	/* open FILE and validate as container */
-	filefd = open(cfg.filepath, O_RDONLY | O_CLOEXEC);
-	if (filefd < 0) {
-		r = -errno;
-		pr_err("%s: [%d] %s\n", cfg.filepath -r, strerror(-r));
-		goto exit;
-	}
-
-	r = read_container(&container, filefd);
+	/* Attempt reading */
+	r = container_create_from_file(&container, cfg.filepath);
 	if (r != 0) {
 		pr_err("%s: failed reading: [%d] %s\n", cfg.filepath, -r, strerror(-r));
 		goto exit;
 	}
 
-	/* Match pubkey if container is valid.
+	/* create new header */
+	if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
+		if (container_is_valid(container)
+			&& (cfg.opt & OPT_FORCE) != OPT_FORCE) {
+			pr_err("FILE is valid container, use --force to overwrite\n");
+			r = -EBADF;
+			goto exit;
+		}
+
+		/* load private key */
+		r = read_private_key(cfg.key_path, cfg.key_pkcs11, &signing_key);
+		if (r != 0) {
+			pr_err("Could not read private key: [%d]: %s\n", -r, strerror(-r));
+			goto exit;
+		}
+		r = container_set_signing_key(container, signing_key);
+		if (r != 0) {
+			pr_err("Failed setting signing key: [%d] %s\n", -r, strerror(-r));
+			goto exit;
+		}
+
+		/* format */
+		r = container_format(container);
+		if (r != 0) {
+			pr_err("Failed formming container: [%d] %s\n", -r, strerror(-r));
+			goto exit;
+		}
+		if (info)
+			container_dump(container);
+		pr_info("container - created\n");
+		goto exit;
+	}
+
+	/* All following operations require container to be valid */
+	if (!container_is_valid(container)) {
+		pr_err("container - not a container\n");
+		r = -EBADF;
+		goto exit;
+	}
+
+	/* Match pubkey.
 	 *
 	 * If OPT_PUBKEY_ANY is set then we are
 	 * satisfied with digest verification towards
 	 * pubkey provided by container as part of container
 	 * validation. */
-	if (((container.opt & CONTAINER_VALID) == CONTAINER_VALID)
-			&& ((cfg.opt & OPT_PUBKEY_ANY) != OPT_PUBKEY_ANY)
-			&& (match_pubkey(cfg.pubkey_path, cfg.pubkey_dir, cfg.pubkey_pkcs11, container.pkey) != 0)) {
+	if ((cfg.opt & OPT_PUBKEY_ANY) != OPT_PUBKEY_ANY
+			&& match_pubkey(cfg.pubkey_path, cfg.pubkey_dir, cfg.pubkey_pkcs11, container_get_verification_key(container)) != 0) {
 		r = -EBADF;
 		pr_err("pubkey validation failed\n");
 		goto exit;
@@ -858,120 +419,39 @@ int main(int argc, char *argv[])
 
 	/* verify data and tree to roothash */
 	if ((cfg.opt & OPT_VERIFY_ONLY) == OPT_VERIFY_ONLY) {
-		if ((container.opt & CONTAINER_VALID) != CONTAINER_VALID) {
-			pr_err("container - not a container\n");
-			r = -EBADF;
-			goto exit;
-		}
-
-		r = verity_open(cfg.filepath, container.tree.offset, NULL, VERITY_VERIFY, container.roothash);
+		r = verity_open(container_get_path(container), container_get_tree_offset(container),
+						NULL, VERITY_VERIFY, container_get_roothash(container));
 		if (r < 0)
 			goto exit;
 		if (info)
-			dump_container(&container);
+			container_dump(container);
 		pr_info("File verified OK\n");
-		goto exit;
-	}
-
-	/* open as devicemapper block device */
-	if ((cfg.opt & OPT_OPEN) == OPT_OPEN) {
-		if ((container.opt & CONTAINER_VALID) != CONTAINER_VALID) {
-			pr_err("container - not a container\n");
-			r = -EBADF;
-			goto exit;
-		}
-		r = verity_open(cfg.filepath, container.tree.offset, cfg.mapperpath, 0, container.roothash);
-		if (r != 0)
-			goto exit;
-
-		/* on success the roothash should be printed */
-		printf("%s\n", container.roothash);
-		r = 0;
 		goto exit;
 	}
 
 	/* dump roothash */
 	if ((cfg.opt & OPT_ROOTHASH) == OPT_ROOTHASH) {
-		if ((container.opt & CONTAINER_VALID) != CONTAINER_VALID) {
-			pr_err("container - not a container\n");
-			r = -EBADF;
-			goto exit;
-		}
-		printf("%s\n", container.roothash);
+		printf("%s\n", container_get_roothash(container));
 		r = 0;
 		goto exit;
 	}
 
-	/* create new header */
-	if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
-		if (((container.opt & CONTAINER_VALID) == CONTAINER_VALID)
-			&& ((cfg.opt & OPT_FORCE) != OPT_FORCE)) {
-			pr_err("FILE is valid container, use --force to overwrite\n");
-			r = -EBADF;
+	/* open as devicemapper block device */
+	if ((cfg.opt & OPT_OPEN) == OPT_OPEN) {
+		r = verity_open(container_get_path(container), container_get_tree_offset(container),
+						cfg.mapperpath, 0, container_get_roothash(container));
+		if (r != 0)
 			goto exit;
-		}
 
-		/* load private key */
-		if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
-			if ((cfg.key_path == NULL) && (cfg.key_pkcs11 == NULL)) {
-				r = -EINVAL;
-				pr_err("Missing key --keyfile or --key-pkcs11 for --create\n");
-				goto exit;
-			}
-			if ((cfg.key_path != NULL) && (cfg.key_pkcs11 != NULL)) {
-				r = -EINVAL;
-				pr_err("--keyfile and --key-pkcs11 are mutually exclusive\n");
-				goto exit;
-			}
-			r = read_private_key(cfg.key_path, cfg.key_pkcs11, &signing_key);
-			if (r != 0) {
-				pr_err("Could not read private key: [%d]: %s\n", -r, strerror(-r));
-				goto exit;
-			}
-		}
-
-		/* reopen for writing */
-		close(filefd);
-		filefd = open(cfg.filepath, O_RDWR | O_CLOEXEC);
-		if (filefd < 0) {
-			r = -errno;
-			pr_err("%s: [%d] %s\n", cfg.filepath, -r, strerror(-r));
-			goto exit;
-		}
-
-		/* remove header if available */
-		if ((container.opt & CONTAINER_VALID) == CONTAINER_VALID) {
-			if (container.data.offset != 0) {
-				pr_err("expected data offset at 0 but got %" PRId64 "\n", container.data.offset);
-				r = -EFAULT;
-				goto exit;
-			}
-			if (container.data.size > INT64_MAX) {
-				pr_err("FILE data larger than maximum supported");
-				r = -EFAULT;
-				goto exit;
-			}
-			r = ftruncate64(filefd, (ssize_t) container.data.size);
-			if (r != 0) {
-				r = -errno;
-				pr_err("%s: failed truncate: [%d]: %s\n", cfg.filepath, -r, strerror(-r));
-				goto exit;
-			}
-		}
-		/* add header */
-		destroy_container(&container);
-		r = write_container(filefd, cfg.filepath, signing_key, &container);
-		if (info)
-			dump_container(&container);
-		pr_info("container - created\n");
+		/* on success the roothash should be printed */
+		printf("%s\n", container_get_roothash(container));
+		r = 0;
 		goto exit;
 	}
 
 	r = -EINVAL;
 exit:
-	if (filefd >= 0)
-		close(filefd);
-	destroy_container(&container);
+	container_free(container);
 	crypt_ctx_free(cctx);
 	EVP_PKEY_free(signing_key);
 	pr_dbg("exit code: [%d]: %s\n", -r, strerror(-r));
