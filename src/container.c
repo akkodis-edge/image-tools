@@ -404,7 +404,7 @@ static int container_read(struct container* container, int fd)
 		}
 		if (r == 0) {
 			pr_dbg("container - invalid signature\n");
-			r = -EFAULT;
+			r = -EBADF;
 			goto exit;
 		}
 	}
