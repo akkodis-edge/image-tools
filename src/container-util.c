@@ -161,6 +161,9 @@ static void print_usage(void)
 	printf("  --pubkey-any     Use pubkey from container\n");
 	printf("  --roothash       Dump roothash\n");
 	printf("  --version        Dump version\n");
+	printf("Experimental (unstable):\n");
+	printf("  --keyfile-ca     x509 for --keyfile. Will wrap roothash, digest\n");
+	printf("                   and certificate in CMS as \"signed-data content type\"\n");
 	printf("\n");
 	printf("Input FILE size when creating a container should be a multiple of 4096,"
 			"if not it will be zero-padded\n");
@@ -204,6 +207,7 @@ struct config {
 	char *filepath;
 	char *mapperpath;
 	char *key_path;
+	char *key_ca_path;
 	char *key_pkcs11;
 	char *pubkey_path;
 	char *pubkey_pkcs11;
@@ -245,6 +249,13 @@ int main(int argc, char *argv[])
 				return EINVAL;
 			}
 			cfg.key_path = argv[i];
+		}
+		else if (strcmp("--keyfile-ca", argv[i]) == 0) {
+			if (++i >= argc) {
+				pr_err("invalid argument --keyfile-ca\n");
+				return EINVAL;
+			}
+			cfg.key_ca_path = argv[i];
 		}
 		else if (strcmp("--key-pkcs11", argv[i]) == 0) {
 			if (++i >= argc) {
@@ -343,8 +354,9 @@ int main(int argc, char *argv[])
 	}
 
 	struct crypt_ctx *cctx = NULL;
-	struct container *container;
+	struct container *container = NULL;
 	EVP_PKEY *signing_key = NULL;
+	X509 *signing_cert = NULL;
 	int r = 0;
 
 	/* crypt context must be loaded before any crypt or openssl calls */
@@ -383,6 +395,19 @@ int main(int argc, char *argv[])
 		if (r != 0) {
 			pr_err("Failed setting signing key: [%d] %s\n", -r, strerror(-r));
 			goto exit;
+		}
+		/* Load certificate */
+		if (cfg.key_ca_path != NULL) {
+			r = crypt_read_x509(&signing_cert, cfg.key_ca_path);
+			if (r != 0) {
+				pr_err("%s: Failed reading signing cert: [%d] %s\n", cfg.key_ca_path, -r, strerror(-r));
+				goto exit;
+			}
+			r = container_set_signing_cert(container, signing_cert);
+			if (r != 0) {
+				pr_err("Failed setting signing cert: [%d] %s\n", -r, strerror(-r));
+				goto exit;
+			}
 		}
 
 		/* format */
@@ -454,6 +479,7 @@ exit:
 	container_free(container);
 	crypt_ctx_free(cctx);
 	EVP_PKEY_free(signing_key);
+	X509_free(signing_cert);
 	pr_dbg("exit code: [%d]: %s\n", -r, strerror(-r));
 	return -r;
 }
