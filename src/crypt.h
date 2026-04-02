@@ -63,6 +63,13 @@ int crypt_read_pkey_ctx_free(struct crypt_read_pkey_ctx* ctx);
  * or negative errno for error. */
 int crypt_read_pkey(struct crypt_read_pkey_ctx* ctx, EVP_PKEY** pkey, char** name);
 
+/* Read "x509" certificate from "path".
+ *
+ * Caller responsible of freeing "x509".
+ *
+ * Returns 0 for success or negative errno for error. */
+int crypt_read_x509(X509** x509, const char* path);
+
 /* Return hash method to use with pkey.
  * crypt_digest_* functions use this hash method.
  *

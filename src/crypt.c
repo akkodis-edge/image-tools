@@ -8,6 +8,7 @@
 #include <openssl/rsa.h>
 #include <openssl/store.h>
 #include <openssl/x509.h>
+#include <openssl/pem.h>
 #include <openssl/err.h>
 #include <openssl/provider.h>
 #include "log.h"
@@ -344,6 +345,18 @@ int crypt_read_pkey(struct crypt_read_pkey_ctx* ctx, EVP_PKEY** pkey, char** nam
 	}
 
 	return 1;
+}
+
+int crypt_read_x509(X509** x509, const char* path)
+{
+	FILE *fp = fopen(path, "r");
+	if (fp == NULL)
+		return -errno;
+	*x509 = PEM_read_X509(fp, NULL, NULL, NULL);
+	fclose(fp);
+	if (*x509 == NULL)
+		return -EBADF;
+	return 0;
 }
 
 const char* crypt_pkey_hash_function(const EVP_PKEY* pkey)
