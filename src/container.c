@@ -736,7 +736,7 @@ int container_write(int fd, const char* path, struct container* container)
 
 	/* write metadata */
 	for (int i = 0; i < REGION_MAX; ++i) {
-		if (regions[i].offset == 0)
+		if (regions[i].offset == 0 || regions[i].buf == NULL)
 			continue;
 		r = pwrite_bytes(fd, regions[i].offset, regions[i].buf, regions[i].size);
 		if (r != 0) {
@@ -746,12 +746,15 @@ int container_write(int fd, const char* path, struct container* container)
 	}
 
 	/* set container parameters */
-	if (EVP_PKEY_up_ref(container->signing_key) != 1) {
+	/* pubkey key only set on plain key signing */
+
+	if (cms == NULL && EVP_PKEY_up_ref(container->signing_key) != 1) {
 		r = -EFAULT;
 		goto exit;
 	}
 	memcpy(&container->hdr, &hdr, sizeof(container->hdr));
-	container->pubkey = container->signing_key;
+	if (cms == NULL)
+		container->pubkey = container->signing_key;
 	container->roothash = (char*) regions[REGION_ROOTHASH].buf;
 	regions[REGION_ROOTHASH].buf = NULL;
 	container->size = (size_t) regions[REGION_HEADER].offset + regions[REGION_HEADER].size;
