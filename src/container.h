@@ -3,6 +3,7 @@
 #define CONTAINER__H__
 
 #include <openssl/evp.h>
+#include <openssl/x509.h>
 
 struct container;
 
@@ -26,6 +27,12 @@ int container_free(struct container* container);
  * Returns pointer to container internal key. Do not free.
  * Will be NULL if not valid. */
 const EVP_PKEY* container_get_verification_key(const struct container* container);
+
+/* Retrieve CMS of roothash.
+ *
+ * Returns pointer to container internal cms. Do not free.
+ * Will be NULL if not valid. */
+CMS_ContentInfo* container_get_cms(struct container* container);
 
 /* Retrieve file path.
  *
@@ -51,6 +58,11 @@ int container_is_valid(const struct container* container);
  *
  * Returns 0 for success or negative errno for error. */
 int container_set_signing_key(struct container* container, EVP_PKEY* pkey);
+
+/* Assign x509 certificate for signing key
+ *
+ * Returns 0 for success or negative errno for error. */
+int container_set_signing_cert(struct container* container, X509* cert);
 
 /* Calculate new hash, sign and write header to file.
  * Expects signing key provided by container_set_signing_key().

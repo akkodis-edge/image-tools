@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <openssl/evp.h>
+#include <openssl/x509.h>
+#include <openssl/bio.h>
 #include "log.h"
 #include "crypt.h"
 #include "verity.h"
@@ -23,8 +25,10 @@ struct container {
 	size_t size;
 	struct header hdr;
 	char *roothash;
+	CMS_ContentInfo *cms;
 	EVP_PKEY *pubkey;
 	EVP_PKEY *signing_key;
+	X509 *signing_cert;
 	int opt;
 };
 
@@ -36,10 +40,51 @@ static const char* hash_function(const EVP_PKEY* pkey)
 	return hash;
 }
 
+static void dump_pkey(const EVP_PKEY* pkey, const char* hash)
+{
+	const char* key_type = EVP_PKEY_get0_type_name(pkey);
+	printf("  key type: %s-%d + %s\n",
+			key_type ? key_type : "unknown",
+			EVP_PKEY_get_bits(pkey),
+			hash != NULL ? hash : hash_function(pkey));
+}
+
+static void dump_x509(int index, const X509* cert)
+{
+	BIO *name_bio = BIO_new(BIO_s_mem());
+	if (name_bio == NULL)
+		goto exit;
+
+	X509_NAME *name = X509_get_subject_name(cert);
+	int r = X509_NAME_print_ex(name_bio, name, 0, XN_FLAG_ONELINE & ~ASN1_STRFLGS_ESC_MSB);
+	if (r != -1) {
+		/* Add null-terminator */
+		if (BIO_write(name_bio, "", 1) == 1) {
+			char *str = NULL;
+			BIO_get_mem_data(name_bio, &str);
+			printf("  %d:   %s\n", index, str);
+		}
+		else {
+			r = -1;
+		}
+	}
+	BIO_free(name_bio);
+	if (r == -1)
+		goto exit;
+
+	EVP_PKEY* pkey = X509_get0_pubkey(cert);
+	if (pkey != NULL) {
+		printf("  %d: ", index);
+		dump_pkey(pkey, NULL);
+	}
+	return;
+exit:
+	printf("%d: ERROR\n", index);
+	return;
+}
+
 void container_dump(const struct container* container)
 {
-	const char* key_type = EVP_PKEY_get0_type_name(container_get_verification_key(container));
-
 	printf("container:\n"
 			"  section   offset     size\n"
 			"  data:     %-10" PRIu64 " [%zu b]\n"
@@ -48,16 +93,32 @@ void container_dump(const struct container* container)
 			"  digest:   %-10" PRIu64 " [%zu b]\n"
 			"  pubkey:   %-10" PRIu64 " [%zu b]\n"
 			"  header:   %-10" PRIu64 " [%zu b]\n"
-			"  key type: %s-%d + %s\n"
 			"  roothash: %s\n",
+
 				(uint64_t) 0, container->hdr.tree_offset,
 				container->hdr.tree_offset, container->hdr.root_offset - container->hdr.tree_offset,
-				container->hdr.root_offset, container->hdr.digest_offset - container->hdr.root_offset,
-				container->hdr.digest_offset, container->hdr.key_offset - container->hdr.digest_offset,
+				container->hdr.root_offset, container->hdr.root_offset == 0 ? 0 : container->hdr.digest_offset - container->hdr.root_offset,
+				container->hdr.digest_offset, container->hdr.digest_offset == 0 ? 0 : container->hdr.key_offset - container->hdr.digest_offset,
 				container->hdr.key_offset, container->size - HEADER_SIZE - container->hdr.key_offset,
 				container->size - HEADER_SIZE, (uint64_t) HEADER_SIZE,
-				key_type ? key_type : "unknown", EVP_PKEY_get_bits(container_get_verification_key(container)),
-				hash_function(container_get_verification_key(container)), container->roothash);
+				container->roothash);
+
+	const EVP_PKEY* pkey = container_get_verification_key(container);
+	if (pkey != NULL)
+		dump_pkey(pkey, NULL);
+
+	CMS_ContentInfo *cms = container_get_cms((struct container*) container);
+	if (cms != NULL) {
+		STACK_OF(X509) *sk_x509 = CMS_get0_signers(cms);
+		printf("  CMS signatures: %d\n", sk_X509_num(sk_x509));
+		X509 *signer = NULL;
+		int index = 0;
+		while ((signer = sk_X509_pop(sk_x509)) != NULL) {
+			dump_x509(index, signer);
+			index++;
+		}
+		sk_X509_free(sk_x509);
+	}
 }
 
 static int write_bytes(int fd, const uint8_t* buf, size_t size)
@@ -240,6 +301,11 @@ static int calculate_offset_size(struct region* region, off64_t previous_end, ui
 	return 0;
 }
 
+static int header_has_cms(const struct header* hdr)
+{
+	return hdr->digest_offset == 0 && hdr->root_offset == 0;
+}
+
 static int container_read(struct container* container, int fd)
 {
 	if (container == NULL || fd < 0)
@@ -265,6 +331,7 @@ static int container_read(struct container* container, int fd)
 	struct region regions[REGION_MAX];
 	memset(regions, 0, sizeof(regions));
 	EVP_PKEY *pubkey = NULL;
+	CMS_ContentInfo *cms = NULL;
 
 	/* data section starts at 0 and ends at tree offset which must be > 0 and divisible by 4096 */
 	if (hdr.tree_offset == 0 || hdr.tree_offset % 4096 != 0)
@@ -273,20 +340,33 @@ static int container_read(struct container* container, int fd)
 	/* find key */
 	if (calculate_offset_size(&regions[REGION_PUBKEY], header_pos, hdr.key_offset) != 0)
 		return -ENOMSG;
-	/* find digest */
-	if (calculate_offset_size(&regions[REGION_DIGEST], regions[REGION_PUBKEY].offset, hdr.digest_offset) != 0)
-		return -ENOMSG;
-	/* find roothash */
-	if (calculate_offset_size(&regions[REGION_ROOTHASH], regions[REGION_DIGEST].offset, hdr.root_offset) != 0)
-		return -ENOMSG;
-	/* allocate an extra byte for roothash null-terminator */
-	regions[REGION_ROOTHASH].extra = 1;
-	/* find tree */
-	if (calculate_offset_size(&regions[REGION_TREE], regions[REGION_ROOTHASH].offset, hdr.tree_offset) != 0)
-		return -ENOMSG;
+	/* Determine whether plain key or cms structure was used.
+	 * cms structures contains key, digest and roothash in REGION_PUBKEY
+	 * while plain key needs to read all sections. */
+	if (!header_has_cms(&hdr)) { /* plain keys */
+		pr_dbg("hdr: plain key signature\n");
+		/* find digest */
+		if (calculate_offset_size(&regions[REGION_DIGEST], regions[REGION_PUBKEY].offset, hdr.digest_offset) != 0)
+			return -ENOMSG;
+		/* find roothash */
+		if (calculate_offset_size(&regions[REGION_ROOTHASH], regions[REGION_DIGEST].offset, hdr.root_offset) != 0)
+			return -ENOMSG;
+		/* allocate an extra byte for roothash null-terminator */
+		regions[REGION_ROOTHASH].extra = 1;
+		/* find tree */
+		if (calculate_offset_size(&regions[REGION_TREE], regions[REGION_ROOTHASH].offset, hdr.tree_offset) != 0)
+			return -ENOMSG;
+	}
+	else { /* CMS */
+		/* find tree */
+		pr_dbg("hdr: cms structure\n");
+		if (calculate_offset_size(&regions[REGION_TREE], regions[REGION_PUBKEY].offset, hdr.tree_offset) != 0)
+			return -ENOMSG;
+	}
 
 	/* Allocate buffers and read pubkey, digest and roothash */
-	for (int i = REGION_PUBKEY; i < REGION_TREE; ++i) {
+	const int read_stop_region = header_has_cms(&hdr) ? REGION_DIGEST : REGION_TREE;
+	for (int i = REGION_PUBKEY; i < read_stop_region; ++i) {
 		/* check for overflow */
 		if ((SIZE_MAX - regions[i].size) < regions[i].extra) {
 			r = -EINVAL;
@@ -306,36 +386,71 @@ static int container_read(struct container* container, int fd)
 		}
 	}
 
-	/* parse pubkey */
-	r = crypt_parse_public_key(regions[REGION_PUBKEY].buf, regions[REGION_PUBKEY].size, &pubkey);
-	if (r != 0) {
-		pr_dbg("container - pubkey: [%d]: %s\n", -r, strerror(-r));
-		goto exit;
+	if (!header_has_cms(&hdr)) { /* parse pubkey */
+		r = crypt_parse_public_key(regions[REGION_PUBKEY].buf, regions[REGION_PUBKEY].size, &pubkey);
+		if (r != 0) {
+			pr_dbg("container - pubkey: [%d]: %s\n", -r, strerror(-r));
+			goto exit;
+		}
+
+		/* validate roothash signature */
+		r = crypt_digest_verity(regions[REGION_ROOTHASH].buf, regions[REGION_ROOTHASH].size,
+								regions[REGION_DIGEST].buf, regions[REGION_DIGEST].size, pubkey);
+		if (r < 0) {
+			pr_dbg("container - digest verify: [%d]: %s\n", -r, strerror(-r));
+			goto exit;
+		}
+		if (r == 0) {
+			pr_dbg("container - invalid signature\n");
+			r = -EFAULT;
+			goto exit;
+		}
+	}
+	else { /* parse cms */
+		r = crypt_parse_cms(regions[REGION_PUBKEY].buf, regions[REGION_PUBKEY].size, &cms);
+		if (r != 0) {
+			pr_dbg("container - cms parse: [%d] %s\n", -r, strerror(-r));
+			goto exit;
+		}
+
+		/* validate data and retrieve roothash */
+		r = crypt_cms_data(cms, &regions[REGION_ROOTHASH].buf, &regions[REGION_ROOTHASH].size);
+		if (r != 0) {
+			pr_dbg("container - cms data: [%d] %s\n", -r, strerror(-r));
+			goto exit;
+		}
+		/* add null terminator */
+		if (SIZE_MAX - regions[REGION_ROOTHASH].size < 1) {
+			r = -EFAULT;
+			goto exit;
+		}
+		regions[REGION_ROOTHASH].size++;
+		uint8_t *newmem = realloc(regions[REGION_ROOTHASH].buf, regions[REGION_ROOTHASH].size);
+		if (newmem == NULL) {
+			r = -ENOMEM;
+			goto exit;
+		}
+		regions[REGION_ROOTHASH].buf = newmem;
+		regions[REGION_ROOTHASH].buf[regions[REGION_ROOTHASH].size - 1] = '\0';
 	}
 
-	/* validate roothash signature */
-	r = crypt_digest_verity(regions[REGION_ROOTHASH].buf, regions[REGION_ROOTHASH].size,
-							regions[REGION_DIGEST].buf, regions[REGION_DIGEST].size, pubkey);
-	if (r == 1) {
-		container->opt |= CONTAINER_VALID;
-		pr_dbg("container - valid\n");
-	}
-	if (r < 0) {
-		pr_dbg("container - invalid signature\n");
-		goto exit;
-	}
+	pr_dbg("container - valid\n");
 
 	/* Set container data */
+	container->opt |= CONTAINER_VALID;
 	container->size = header_pos + HEADER_SIZE;
 	memcpy(&container->hdr, &hdr, sizeof(container->hdr));
 	container->pubkey = pubkey;
 	pubkey = NULL;
+	container->cms = cms;
+	cms = NULL;
 	container->roothash = (char*) regions[REGION_ROOTHASH].buf;
 	regions[REGION_ROOTHASH].buf = NULL;
 
 	r = 0;
 exit:
 	EVP_PKEY_free(pubkey);
+	CMS_ContentInfo_free(cms);
 	for (int i = 0; i < REGION_MAX; ++i) {
 		if (regions[i].buf != NULL)
 			free(regions[i].buf);
@@ -399,6 +514,8 @@ int container_free(struct container* container)
 		free(container->path);
 	EVP_PKEY_free(container->pubkey);
 	EVP_PKEY_free(container->signing_key);
+	X509_free(container->signing_cert);
+	CMS_ContentInfo_free(container->cms);
 	if (container->roothash != NULL)
 		free(container->roothash);
 	free(container);
@@ -423,11 +540,29 @@ int container_set_signing_key(struct container* container, EVP_PKEY* pkey)
 	return 0;
 }
 
+int container_set_signing_cert(struct container* container, X509* cert)
+{
+	if (container == NULL || cert == NULL)
+		return -EINVAL;
+	if (X509_up_ref(cert) != 1)
+		return -EFAULT;
+	X509_free(container->signing_cert);
+	container->signing_cert = cert;
+	return 0;
+}
+
 const EVP_PKEY* container_get_verification_key(const struct container* container)
 {
 	if (container == NULL)
 		return NULL;
 	return container->pubkey;
+}
+
+CMS_ContentInfo* container_get_cms(struct container* container)
+{
+	if (container == NULL)
+		return NULL;
+	return container->cms;
 }
 
 const char* container_get_path(const struct container* container)
@@ -462,6 +597,7 @@ static int calculate_offset(const struct region* previous, off64_t* offset)
 
 int container_write(int fd, const char* path, struct container* container)
 {
+	CMS_ContentInfo *cms = NULL;
 	char tmppath[] = "/tmp/ctutil-XXXXXX";
 	int r = 0;
 	int tmpfd = -1;
@@ -514,33 +650,59 @@ int container_write(int fd, const char* path, struct container* container)
 		goto exit;
 	}
 
-	/* calculate roothash offset */
-	if (calculate_offset(&regions[REGION_TREE], &regions[REGION_ROOTHASH].offset) != 0) {
-		r = -EFAULT;
-		goto exit;
-	}
+	/* Determine signing method to use based on availability of signing certificate.
+	 * Either plain digest with external roothash or CMS SignedData structure
+	 * with wrapped roothash. */
+	if (container->signing_cert == NULL) {
+		/* calculate roothash offset */
+		if (calculate_offset(&regions[REGION_TREE], &regions[REGION_ROOTHASH].offset) != 0) {
+			r = -EFAULT;
+			goto exit;
+		}
 
-	/* Calculate digest of roothash */
-	r = crypt_digest_create(regions[REGION_ROOTHASH].buf, regions[REGION_ROOTHASH].size,
-							&regions[REGION_DIGEST].buf, &regions[REGION_DIGEST].size,
-							container->signing_key);
-	if (r != 0)
-		goto exit;
-	if (calculate_offset(&regions[REGION_ROOTHASH], &regions[REGION_DIGEST].offset) != 0) {
-		r = -EFAULT;
-		goto exit;
-	}
+		/* Calculate digest of roothash */
+		r = crypt_digest_create(regions[REGION_ROOTHASH].buf, regions[REGION_ROOTHASH].size,
+								&regions[REGION_DIGEST].buf, &regions[REGION_DIGEST].size,
+								container->signing_key);
+		if (r != 0)
+			goto exit;
+		if (calculate_offset(&regions[REGION_ROOTHASH], &regions[REGION_DIGEST].offset) != 0) {
+			r = -EFAULT;
+			goto exit;
+		}
 
-	/* Retrieve pubkey */
-	r = crypt_serialize_public_key(&regions[REGION_PUBKEY].buf, &regions[REGION_PUBKEY].size,
-									container->signing_key);
-	if (r != 0) {
-		pr_err("failed extracting pubkey [%d]: %s\n", -r, strerror(-r));
-		goto exit;
+		/* Retrieve pubkey */
+		r = crypt_serialize_public_key(&regions[REGION_PUBKEY].buf, &regions[REGION_PUBKEY].size,
+										container->signing_key);
+		if (r != 0) {
+			pr_err("failed extracting pubkey [%d]: %s\n", -r, strerror(-r));
+			goto exit;
+		}
+		if (calculate_offset(&regions[REGION_DIGEST], &regions[REGION_PUBKEY].offset) != 0) {
+			r = -EFAULT;
+			goto exit;
+		}
 	}
-	if (calculate_offset(&regions[REGION_DIGEST], &regions[REGION_PUBKEY].offset) != 0) {
-		r = -EFAULT;
-		goto exit;
+	else {
+		/* Create cms with roothash */
+		r = crypt_cms_create(regions[REGION_ROOTHASH].buf, regions[REGION_ROOTHASH].size,
+								&cms, container->signing_key, container->signing_cert);
+		if (r != 0)
+			goto exit;
+		r = crypt_serialize_cms(&regions[REGION_PUBKEY].buf, &regions[REGION_PUBKEY].size,
+										cms);
+		if (r != 0) {
+			pr_err("failed serializing cms: [%d] %s\n", -r, strerror(-r));
+			goto exit;
+		}
+
+		/* roothash part of cms, do not write to container */
+		regions[REGION_ROOTHASH].offset = 0;
+		/* CMS placed in pubkey region, located after tree*/
+		if (calculate_offset(&regions[REGION_TREE], &regions[REGION_PUBKEY].offset) != 0) {
+			r = -EFAULT;
+			goto exit;
+		}
 	}
 
 	/* Create header */
@@ -574,7 +736,7 @@ int container_write(int fd, const char* path, struct container* container)
 
 	/* write metadata */
 	for (int i = 0; i < REGION_MAX; ++i) {
-		if (regions[i].buf == NULL)
+		if (regions[i].offset == 0)
 			continue;
 		r = pwrite_bytes(fd, regions[i].offset, regions[i].buf, regions[i].size);
 		if (r != 0) {
@@ -593,6 +755,8 @@ int container_write(int fd, const char* path, struct container* container)
 	container->roothash = (char*) regions[REGION_ROOTHASH].buf;
 	regions[REGION_ROOTHASH].buf = NULL;
 	container->size = (size_t) regions[REGION_HEADER].offset + regions[REGION_HEADER].size;
+	container->cms = cms;
+	cms = NULL;
 
 	r = 0;
 exit:
@@ -603,6 +767,7 @@ exit:
 	if (unlink(tmppath) != 0)
 		pr_info("failed removing tmpfile: %s\n", tmppath);
 	close(tmpfd);
+	CMS_ContentInfo_free(cms);
 	return r;
 }
 
@@ -634,6 +799,8 @@ int container_format(struct container* container)
 		container->pubkey = NULL;
 		free(container->roothash);
 		container->roothash = NULL;
+		CMS_ContentInfo_free(container->cms);
+		container->cms = NULL;
 	}
 
 	r = container_write(fd, container->path, container);
