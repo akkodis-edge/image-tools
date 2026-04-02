@@ -11,6 +11,8 @@
 #include <openssl/pem.h>
 #include <openssl/err.h>
 #include <openssl/provider.h>
+#include <openssl/cms.h>
+#include <openssl/bio.h>
 #include "log.h"
 #include "crypt.h"
 
@@ -103,6 +105,28 @@ int crypt_serialize_public_key(uint8_t** data, size_t* size, const EVP_PKEY* pke
 	if (data == NULL || *data != NULL || size == NULL || pkey == NULL)
 		return -EINVAL;
 	const int bytes = i2d_PUBKEY(pkey, (unsigned char**) data);
+	if (bytes < 0)
+		return -ENOSYS;
+	*size = (size_t) bytes;
+	return 0;
+}
+
+int crypt_parse_cms(const uint8_t* data, size_t size, CMS_ContentInfo** cms)
+{
+	if (data == NULL || size > LONG_MAX || cms == NULL || *cms != NULL)
+		return -EINVAL;
+	const unsigned char *tmp = data;
+	*cms = d2i_CMS_ContentInfo(NULL, &tmp, (long) size);
+	if (*cms == NULL)
+		return -EPROTONOSUPPORT;
+	return 0;
+}
+
+int crypt_serialize_cms(uint8_t** data, size_t* size, const CMS_ContentInfo* cms)
+{
+	if (data == NULL || *data != NULL || size == NULL || cms == NULL)
+		return -EINVAL;
+	const int bytes = i2d_CMS_ContentInfo(cms, (unsigned char**) data);
 	if (bytes < 0)
 		return -ENOSYS;
 	*size = (size_t) bytes;
@@ -553,3 +577,112 @@ exit:
 	EVP_MD_free(algo);
 	return r;
 }
+
+int crypt_cms_data(CMS_ContentInfo* cms, uint8_t** data, size_t* data_size)
+{
+	if (cms == NULL || data == NULL || *data != NULL || data_size == NULL)
+		return -EINVAL;
+
+	BIO *data_bio = NULL;
+	BUF_MEM *data_ptr = NULL;
+	int r = 0;
+
+	data_bio = BIO_new(BIO_s_mem());
+	if (data_bio == NULL) {
+		pr_err("Failed creating bio\n");
+		r = -EFAULT;
+		goto exit;
+	}
+
+	/* Verify contained data/digest is signed by contained certificate
+	 * Do not attempt verifying certificate chain. */
+	if (CMS_verify(cms, NULL, NULL, NULL, data_bio, CMS_NO_SIGNER_CERT_VERIFY) != 1) {
+		pr_err("CMS_verify failed\n");
+		r = -EFAULT;
+		goto exit;
+	}
+
+	/* Take ownership of BIO data */
+	long bytes = BIO_get_mem_data(data_bio, (char**) data);
+	if (bytes < 0) {
+		pr_err("CMS_verify returned data error\n");
+		r = -EFAULT;
+		goto exit;
+	}
+	if (bytes == 0) {
+		pr_err("CMS_verify returned 0 data bytes\n");
+		r = -EFAULT;
+		goto exit;
+	}
+	*data_size = (size_t) bytes;
+	BIO_get_mem_ptr(data_bio, &data_ptr);
+	BIO_set_close(data_bio, BIO_NOCLOSE);
+	data_ptr->data = NULL;
+
+	r = 0;
+exit:
+	BIO_free(data_bio);
+	BUF_MEM_free(data_ptr);
+	return r;
+}
+
+int crypt_cms_create(const uint8_t* data, size_t data_size, CMS_ContentInfo** cms, EVP_PKEY* pkey, X509* cert)
+{
+	if (data == NULL || data_size == 0 || data_size > INT_MAX
+		|| cms == NULL || *cms != NULL || pkey == NULL || cert == NULL)
+		return -EINVAL;
+
+	BIO *data_bio = NULL;
+	CMS_ContentInfo *content = NULL;
+	EVP_MD *algo = NULL;
+	int r = 0;
+
+	data_bio = BIO_new_mem_buf(data, (int) data_size);
+	if (data_bio == NULL) {
+		pr_err("Failed creating bio\n")
+		r = -EFAULT;
+		goto exit;
+	}
+
+	/* Prepare cms structure */
+	content = CMS_sign(NULL, NULL, NULL, NULL, CMS_PARTIAL);
+	if (content == NULL) {
+		pr_err("Failed creating cms structure\n");
+		r = -EFAULT;
+		goto exit;
+	}
+
+	/* Determine hash method  */
+	algo = EVP_MD_fetch(NULL, crypt_pkey_hash_function(pkey), NULL);
+	if (algo == NULL) {
+		pr_err("failed fetching cms algorithm\n");
+		r = -ENOSYS;
+		goto exit;
+	}
+
+	/* Add signing key and corresponding certificate */
+	CMS_SignerInfo *signer = CMS_add1_signer(content, cert, pkey, algo, CMS_NOSMIMECAP);
+	if (signer == NULL) {
+		pr_err("Failed adding signer to cms structure\n");
+		r = -EFAULT;
+		goto exit;
+	}
+
+	/* Calculate and sign digest */
+	if (CMS_final(content, data_bio, NULL, CMS_BINARY) != 1) {
+		pr_err("Failed signing cms structure\n");
+		r = -EFAULT;
+		goto exit;
+	}
+
+	*cms = content;
+	content = NULL;
+
+	r = 0;
+exit:
+	BIO_free(data_bio);
+	CMS_ContentInfo_free(content);
+	EVP_MD_free(algo);
+	return r;
+}
+

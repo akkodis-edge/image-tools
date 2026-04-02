@@ -3,6 +3,8 @@
 #define CRYPT__H__
 
 #include <openssl/evp.h>
+#include <openssl/x509.h>
+#include <openssl/cms.h>
 
 struct crypt_ctx;
 
@@ -20,7 +22,7 @@ int crypt_ctx_free(struct crypt_ctx* cctx);
 
 /* Parse "pkey" from "data" of "size".
  *
- * Caller responsible of freeing pkey.
+ * Caller responsible of freeing "pkey".
  *
  * Returns 0 for success or negative errno on error. */
 int crypt_parse_public_key(const uint8_t* data, size_t size, EVP_PKEY** pkey);
@@ -31,6 +33,20 @@ int crypt_parse_public_key(const uint8_t* data, size_t size, EVP_PKEY** pkey);
  *
  * Returns 0 for success or negative errno for error. */
 int crypt_serialize_public_key(uint8_t** data, size_t* size, const EVP_PKEY* pkey);
+
+/* Parse "cms" from "data" of "size".
+ *
+ * Caller responsible of freeing "cms".
+ *
+ * Returns 0 for success or negative errno on error. */
+int crypt_parse_cms(const uint8_t* data, size_t size, CMS_ContentInfo** cms);
+
+/* Serialize "cms" to "data" of "size".
+ *
+ * Caller responsible of freeing "data".
+ *
+ * Returns 0 for success or negative errno for error. */
+int crypt_serialize_cms(uint8_t** data, size_t* size, const CMS_ContentInfo* cms);
 
 struct crypt_read_pkey_ctx;
 
@@ -91,5 +107,25 @@ int crypt_digest_verity(const uint8_t* data, size_t data_size, const uint8_t* di
  *
  * Returns 0 for success or negative errno for error. */
 int crypt_digest_create(const uint8_t* data, size_t data_size, uint8_t** digest, size_t* digest_size, EVP_PKEY* pkey);
+
+/* Verify CMS SignedData structure of "cms" digest signature and
+ * return signed "data" of size "data_size".
+ *
+ * This functions does NOT verify certificate chain, only the contained data
+ * towards container signatures.
+ *
+ * Caller responsible of freeing "data".
+ *
+ * Returns 0 for success or negative errno for error. */
+int crypt_cms_data(CMS_ContentInfo* cms, uint8_t** data, size_t* data_size);
+
+/* Create CMS SignedData structure of "data" with size "data_size" and output
+ * to "cms". Sign with "pkey" and corresponding certificate "cert".
+ * Hashing method determined by crypt_pkey_hash_function(pkey).
+ *
+ * Caller responsible of freeing "cms".
+ *
+ * Returns 0 for success or negative errno for error. */
+int crypt_cms_create(const uint8_t* data, size_t data_size, CMS_ContentInfo** cms, EVP_PKEY* pkey, X509* cert);
 
 #endif // CRYPT__H__
