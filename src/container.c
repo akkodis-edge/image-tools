@@ -75,7 +75,7 @@ static void dump_x509(int index, const X509* cert)
 	EVP_PKEY* pkey = X509_get0_pubkey(cert);
 	if (pkey != NULL) {
 		printf("  %d: ", index);
-		dump_pkey(pkey, NULL);
+		dump_pkey(pkey, "");
 	}
 	return;
 exit:
@@ -96,7 +96,9 @@ void container_dump(const struct container* container)
 			"  roothash: %s\n",
 
 				(uint64_t) 0, container->hdr.tree_offset,
-				container->hdr.tree_offset, container->hdr.root_offset - container->hdr.tree_offset,
+				container->hdr.tree_offset, container->hdr.root_offset == 0
+						? container->hdr.key_offset - container->hdr.tree_offset
+						: container->hdr.root_offset - container->hdr.tree_offset,
 				container->hdr.root_offset, container->hdr.root_offset == 0 ? 0 : container->hdr.digest_offset - container->hdr.root_offset,
 				container->hdr.digest_offset, container->hdr.digest_offset == 0 ? 0 : container->hdr.key_offset - container->hdr.digest_offset,
 				container->hdr.key_offset, container->size - HEADER_SIZE - container->hdr.key_offset,
