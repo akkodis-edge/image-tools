@@ -388,12 +388,12 @@ int main(int argc, char *argv[])
 	}
 
 	if ((cfg.opt & OPT_CREATE) == OPT_CREATE) {
-		if ((cfg.key_path == NULL) && (cfg.key_pkcs11 == NULL)) {
-			pr_err("Missing key --keyfile or --key-pkcs11 for --create\n");
+		if ((cfg.key_path == NULL) && (cfg.key_pkcs11 == NULL) && (cfg.key_ca_path == NULL)) {
+			pr_err("Missing key --keyfile, --keyfile-ca or --key-pkcs11 for --create\n");
 			return EINVAL;
 		}
-		if ((cfg.key_path != NULL) && (cfg.key_pkcs11 != NULL)) {
-			pr_err("--keyfile and --key-pkcs11 are mutually exclusive\n");
+		if ((cfg.key_path != NULL) && (cfg.key_pkcs11 != NULL) && (cfg.key_ca_path != NULL)) {
+			pr_err("--keyfile, --keyfile-ca and --key-pkcs11 are mutually exclusive\n");
 			return EINVAL;
 		}
 	}
