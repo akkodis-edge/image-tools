@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <openssl/evp.h>
+#include <openssl/pem.h>
 #include "log.h"
 #include "header.h"
 #include "verity.h"
@@ -164,6 +165,7 @@ static void print_usage(void)
 	printf("Experimental (unstable):\n");
 	printf("  --keyfile-ca     x509 for --keyfile. Will wrap roothash, digest\n");
 	printf("                   and certificate in CMS as \"signed-data content type\"\n");
+	printf("  --signer         Dump either pubkey or cms as PEM form to provided path\n");
 	printf("\n");
 	printf("Input FILE size when creating a container should be a multiple of 4096,"
 			"if not it will be zero-padded\n");
@@ -200,6 +202,7 @@ enum options {
 	OPT_ROOTHASH     = 1 << 4,
 	OPT_PUBKEY_ANY   = 1 << 5,
 	OPT_CLOSE        = 1 << 6,
+	OPT_SIGNER       = 1 << 7,
 };
 
 struct config {
@@ -212,7 +215,41 @@ struct config {
 	char *pubkey_path;
 	char *pubkey_pkcs11;
 	char *pubkey_dir;
+	char *signer_path;
 };
+
+static int write_signer(struct container* container, const char* path)
+{
+	if (!container_is_valid(container))
+		return -EINVAL;
+
+	FILE *fp = fopen(path, "w");
+	if (fp == NULL)
+		return -errno;
+
+	int r = -EINVAL;
+
+	const CMS_ContentInfo *cms = container_get_cms(container);
+	if (cms != NULL) {
+		r = 0;
+		if (PEM_write_CMS(fp, cms) != 1)
+			r = -EIO;
+		goto exit;
+
+	}
+
+	const EVP_PKEY *pkey = container_get_verification_key(container);
+	if (pkey != NULL) {
+		r = 0;
+		if (PEM_write_PUBKEY(fp, pkey) != 1)
+			r = -EIO;
+		goto exit;
+	}
+
+exit:
+	fclose(fp);
+	return r;
+}
 
 //NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int main(int argc, char *argv[])
@@ -234,6 +271,14 @@ int main(int argc, char *argv[])
 			}
 			cfg.opt |= OPT_OPEN;
 			cfg.mapperpath = argv[i];
+		}
+		else if (strcmp("--signer", argv[i]) == 0) {
+			if (++i >= argc) {
+				pr_err("invalid argument --signer\n");
+				return EINVAL;
+			}
+			cfg.opt |= OPT_SIGNER | OPT_PUBKEY_ANY;
+			cfg.signer_path = argv[i];
 		}
 		else if (strcmp("--close", argv[i]) == 0) {
 			if (++i >= argc) {
@@ -317,7 +362,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if ((cfg.opt & (OPT_VERIFY_ONLY | OPT_CREATE | OPT_OPEN | OPT_ROOTHASH | OPT_CLOSE)) == 0) {
+	if ((cfg.opt & (OPT_VERIFY_ONLY | OPT_CREATE | OPT_OPEN | OPT_ROOTHASH | OPT_CLOSE | OPT_SIGNER)) == 0) {
 		pr_err("Missing operation --verify, --create, --open, --close or --roothash\n");
 		return EINVAL;
 	}
@@ -413,7 +458,7 @@ int main(int argc, char *argv[])
 		/* format */
 		r = container_format(container);
 		if (r != 0) {
-			pr_err("Failed formming container: [%d] %s\n", -r, strerror(-r));
+			pr_err("Failed formatting container: [%d] %s\n", -r, strerror(-r));
 			goto exit;
 		}
 		if (info)
@@ -471,6 +516,14 @@ int main(int argc, char *argv[])
 		/* on success the roothash should be printed */
 		printf("%s\n", container_get_roothash(container));
 		r = 0;
+		goto exit;
+	}
+
+	/* dump signer */
+	if ((cfg.opt & OPT_SIGNER) == OPT_SIGNER) {
+		r = write_signer(container, cfg.signer_path);
+		if (r != 0)
+			pr_err("Failed writing signer: [%d] %s\n", -r, strerror(-r));
 		goto exit;
 	}
 
