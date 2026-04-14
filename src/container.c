@@ -273,6 +273,7 @@ static int calculate_offset_size(struct region* region, off64_t previous_end, ui
 		return -EINVAL;
 	region->offset = start;
 	region->size = previous_end - start;
+
 	return 0;
 }
 
@@ -318,6 +319,127 @@ static int container_info_from_header(struct container_info* info, const struct 
 	/* Data always start at offset 0 */
 	if (calculate_offset_size(&info->regions[REGION_DATA], info->regions[REGION_TREE].offset, 0) != 0)
 		return -EINVAL;
+
+	return 0;
+}
+
+static int calculate_offset(const struct region* previous, off64_t* offset)
+{
+	if (previous->size > INT64_MAX ||
+		(INT64_MAX - previous->offset) < (off64_t) previous->size)
+		return -EINVAL;
+	*offset = previous->offset + (off64_t) previous->size;
+
+	return 0;
+}
+
+static int container_info_set_data(struct container_info* info, int fd)
+{
+	const off64_t size = lseek64(fd, 0, SEEK_END);
+	if (size < 0)
+		return -errno;
+	info->regions[REGION_DATA].size = (size_t) size;
+	info->regions[REGION_DATA].offset = 0;
+
+	return 0;
+}
+
+static int container_info_set_tree(struct container_info* info, int fd)
+{
+	const off64_t size = lseek64(fd, 0, SEEK_END);
+	if (size < 0)
+		return -errno;
+	info->regions[REGION_TREE].size = (size_t) size;
+	if (calculate_offset(&info->regions[REGION_DATA], &info->regions[REGION_TREE].offset) != 0)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int container_info_set_digest(struct container_info* info, EVP_PKEY* pkey)
+{
+	/* calculate roothash offset */
+	if (calculate_offset(&info->regions[REGION_TREE], &info->regions[REGION_ROOTHASH].offset) != 0)
+		return -EINVAL;
+
+	/* Calculate digest of roothash */
+	int r = crypt_digest_create(info->regions[REGION_ROOTHASH].buf, info->regions[REGION_ROOTHASH].size,
+							&info->regions[REGION_DIGEST].buf, &info->regions[REGION_DIGEST].size,
+							pkey);
+	if (r != 0)
+		return r;
+	if (calculate_offset(&info->regions[REGION_ROOTHASH], &info->regions[REGION_DIGEST].offset) != 0)
+		return -EINVAL;
+
+	/* Retrieve pubkey */
+	r = crypt_serialize_public_key(&info->regions[REGION_PUBKEY].buf, &info->regions[REGION_PUBKEY].size,
+									pkey);
+	if (r != 0)
+		return r;
+	if (calculate_offset(&info->regions[REGION_DIGEST], &info->regions[REGION_PUBKEY].offset) != 0)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int container_info_set_cms(struct container_info* info, CMS_ContentInfo** cms, EVP_PKEY* pkey, X509* cert)
+{
+	/* Create cms with roothash */
+	int r = crypt_cms_create(info->regions[REGION_ROOTHASH].buf, info->regions[REGION_ROOTHASH].size,
+							cms, pkey, cert);
+	if (r != 0)
+		return r;
+
+	/* serialize */
+	r = crypt_serialize_cms(&info->regions[REGION_PUBKEY].buf, &info->regions[REGION_PUBKEY].size,
+									*cms);
+	if (r != 0)
+		return r;
+	if (calculate_offset(&info->regions[REGION_TREE], &info->regions[REGION_PUBKEY].offset) != 0)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int container_info_to_header(struct container_info* info, struct header* hdr)
+{
+	/* Create header */
+	if (calculate_offset(&info->regions[REGION_PUBKEY], &info->regions[REGION_HEADER].offset) != 0)
+		return -EINVAL;
+
+	/* allocate if needed */
+	info->regions[REGION_HEADER].size = HEADER_SIZE;
+	if (info->regions[REGION_HEADER].buf == NULL)
+		info->regions[REGION_HEADER].buf = malloc(info->regions[REGION_HEADER].size);
+	if (info->regions[REGION_HEADER].buf == NULL)
+		return -ENOMEM;
+
+	/* serialize */
+	memset(hdr, 0, sizeof(*hdr));
+	hdr->magic = HEADER_MAGIC;
+	hdr->tree_offset = info->regions[REGION_TREE].offset;
+	hdr->root_offset = info->regions[REGION_ROOTHASH].offset;
+	hdr->digest_offset = info->regions[REGION_DIGEST].offset;
+	hdr->key_offset = info->regions[REGION_PUBKEY].offset;
+
+	return container_header_serialize(hdr, info->regions[REGION_HEADER].buf, info->regions[REGION_HEADER].size);
+}
+
+static int container_info_write_fd(const struct container_info* info, int fd)
+{
+	/* write regions header, pubkey, digest and roothash */
+	for (int i = REGION_HEADER; i < REGION_TREE; ++i) {
+		/* skip if size is 0 */
+		if (info->regions[i].size == 0)
+			continue;
+
+		/* write */
+		const int r = pwrite_bytes(fd, info->regions[i].offset, info->regions[i].buf, info->regions[i].size);
+		if (r != 0) {
+			pr_err("failed writing to FILE: [%d] %s\n", -r, strerror(-r));
+			return r;
+		}
+	}
 
 	return 0;
 }
@@ -612,15 +734,6 @@ uint64_t container_get_tree_offset(const struct container* container)
 	return container->hdr.tree_offset;
 }
 
-static int calculate_offset(const struct region* previous, off64_t* offset)
-{
-	if (previous->size > INT64_MAX ||
-		(INT64_MAX - previous->offset) < (off64_t) previous->size)
-		return -EINVAL;
-	*offset = previous->offset + (off64_t) previous->size;
-	return 0;
-}
-
 int container_write(int fd, const char* path, struct container* container)
 {
 	CMS_ContentInfo *cms = NULL;
@@ -643,117 +756,65 @@ int container_write(int fd, const char* path, struct container* container)
 		return r;
 	}
 
-	struct region regions[REGION_MAX];
-	memset(regions, 0, sizeof(regions));
+	struct container_info info;
+	memset(&info, 0, sizeof(info));
 
 	/* verity create */
-	r = verity_create(path, tmppath, (char**) &regions[REGION_ROOTHASH].buf);
+	r = verity_create(path, tmppath, (char**) &info.regions[REGION_ROOTHASH].buf);
 	if (r != 0)
 		goto exit;
 	/* Do not include null-terminator in output */
-	regions[REGION_ROOTHASH].size = strlen((const char*) regions[REGION_ROOTHASH].buf);
+	info.regions[REGION_ROOTHASH].size = strlen((const char*) info.regions[REGION_ROOTHASH].buf);
 
-	/* Find data size */
-	const off64_t data_size = lseek64(fd, 0, SEEK_END);
-	if (data_size < 0) {
-		r = -errno;
-		pr_err("%s: failed getting data size [%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
-	regions[REGION_DATA].size = (size_t) data_size;
-	regions[REGION_DATA].offset = 0;
+	/* Add all sections, in order, starting with data */
 
-	/* Find tree size */
-	const off64_t tree_size = lseek64(tmpfd, 0, SEEK_END);
-	if (tree_size < 0) {
-		r = -errno;
-		pr_err("%s: failed getting tree size [%d]: %s\n", -r, strerror(-r));
-		goto exit;
+	/* Add data */
+	r = container_info_set_data(&info, fd);
+	if (r != 0) {
+		pr_err("%s: failed getting data size: [%d] %s\n", -r, strerror(-r));
+		return r;
 	}
-	regions[REGION_TREE].size = (size_t) tree_size;
-	if (calculate_offset(&regions[REGION_DATA], &regions[REGION_TREE].offset) != 0) {
-		r = -EFAULT;
-		goto exit;
+
+	/* Add tree */
+	r = container_info_set_tree(&info, tmpfd);
+	if (r != 0) {
+		pr_err("%s: failed getting tree size: [%d] %s\n", -r, strerror(-r));
+		return r;
 	}
 
 	/* Determine signing method to use based on availability of signing certificate.
 	 * Either plain digest with external roothash or CMS SignedData structure
 	 * with wrapped roothash. */
 	if (container->signing_cert == NULL) {
-		/* calculate roothash offset */
-		if (calculate_offset(&regions[REGION_TREE], &regions[REGION_ROOTHASH].offset) != 0) {
-			r = -EFAULT;
-			goto exit;
-		}
-
-		/* Calculate digest of roothash */
-		r = crypt_digest_create(regions[REGION_ROOTHASH].buf, regions[REGION_ROOTHASH].size,
-								&regions[REGION_DIGEST].buf, &regions[REGION_DIGEST].size,
-								container->signing_key);
-		if (r != 0)
-			goto exit;
-		if (calculate_offset(&regions[REGION_ROOTHASH], &regions[REGION_DIGEST].offset) != 0) {
-			r = -EFAULT;
-			goto exit;
-		}
-
-		/* Retrieve pubkey */
-		r = crypt_serialize_public_key(&regions[REGION_PUBKEY].buf, &regions[REGION_PUBKEY].size,
-										container->signing_key);
+		/* plain key */
+		r = container_info_set_digest(&info, container->signing_key);
 		if (r != 0) {
-			pr_err("failed extracting pubkey [%d]: %s\n", -r, strerror(-r));
-			goto exit;
-		}
-		if (calculate_offset(&regions[REGION_DIGEST], &regions[REGION_PUBKEY].offset) != 0) {
-			r = -EFAULT;
+			pr_err("failed creating digest: [%d] %s\n", -r, strerror(-r));
 			goto exit;
 		}
 	}
 	else {
-		/* Create cms with roothash */
-		r = crypt_cms_create(regions[REGION_ROOTHASH].buf, regions[REGION_ROOTHASH].size,
-								&cms, container->signing_key, container->signing_cert);
-		if (r != 0)
-			goto exit;
-		r = crypt_serialize_cms(&regions[REGION_PUBKEY].buf, &regions[REGION_PUBKEY].size,
-										cms);
+		/* cms */
+		r = container_info_set_cms(&info, &cms, container->signing_key, container->signing_cert);
 		if (r != 0) {
-			pr_err("failed serializing cms: [%d] %s\n", -r, strerror(-r));
+			pr_err("failed creating cms: [%d] %s\n", -r, strerror(-r));
 			goto exit;
 		}
 
-		/* roothash part of cms, do not write to container */
-		regions[REGION_ROOTHASH].offset = 0;
-		/* CMS placed in pubkey region, located after tree*/
-		if (calculate_offset(&regions[REGION_TREE], &regions[REGION_PUBKEY].offset) != 0) {
-			r = -EFAULT;
-			goto exit;
-		}
+		/* roothash and digest part of cms, do not write to container */
+		if (info.regions[REGION_ROOTHASH].buf != NULL)
+			free(info.regions[REGION_ROOTHASH].buf);
+		memset(&info.regions[REGION_ROOTHASH], 0, sizeof(info.regions[REGION_ROOTHASH]));
+		if (info.regions[REGION_DIGEST].buf != NULL)
+			free(info.regions[REGION_DIGEST].buf);
+		memset(&info.regions[REGION_DIGEST], 0, sizeof(info.regions[REGION_DIGEST]));
 	}
 
 	/* Create header */
-	regions[REGION_HEADER].size = HEADER_SIZE;
-	if (calculate_offset(&regions[REGION_PUBKEY], &regions[REGION_HEADER].offset) != 0) {
-		r = -EFAULT;
-		goto exit;
-	}
-	regions[REGION_HEADER].buf = malloc(regions[REGION_HEADER].size);
-	if (regions[REGION_HEADER].buf == NULL) {
-		r = -ENOMEM;
-		goto exit;
-	}
 	struct header hdr;
-	memset(&hdr, 0, sizeof(hdr));
-	hdr.magic = HEADER_MAGIC;
-	hdr.tree_offset = regions[REGION_TREE].offset;
-	hdr.root_offset = regions[REGION_ROOTHASH].offset;
-	hdr.digest_offset = regions[REGION_DIGEST].offset;
-	hdr.key_offset = regions[REGION_PUBKEY].offset;
-	r = container_header_serialize(&hdr, regions[REGION_HEADER].buf, regions[REGION_HEADER].size);
-	if (r != 0) {
-		pr_err("failed creating header: %[%d]: %s\n", -r, strerror(-r));
-		goto exit;
-	}
+	r = container_info_to_header(&info, &hdr);
+	if (r != 0)
+		return r;
 
 	/* append hash tree */
 	r = cat_rhs_on_lhs(fd, tmpfd);
@@ -761,15 +822,9 @@ int container_write(int fd, const char* path, struct container* container)
 		goto exit;
 
 	/* write metadata */
-	for (int i = 0; i < REGION_MAX; ++i) {
-		if (regions[i].offset == 0 || regions[i].buf == NULL)
-			continue;
-		r = pwrite_bytes(fd, regions[i].offset, regions[i].buf, regions[i].size);
-		if (r != 0) {
-			pr_err("failed writing to FILE: [%d] %s\n", -r, strerror(-r));
-			goto exit;
-		}
-	}
+	r = container_info_write_fd(&info, fd);
+	if (r != 0)
+		goto exit;
 
 	/* set container parameters */
 	/* pubkey key only set on plain key signing */
@@ -781,18 +836,15 @@ int container_write(int fd, const char* path, struct container* container)
 	memcpy(&container->hdr, &hdr, sizeof(container->hdr));
 	if (cms == NULL)
 		container->pubkey = container->signing_key;
-	container->roothash = (char*) regions[REGION_ROOTHASH].buf;
-	regions[REGION_ROOTHASH].buf = NULL;
-	container->size = (size_t) regions[REGION_HEADER].offset + regions[REGION_HEADER].size;
+	container->roothash = (char*) info.regions[REGION_ROOTHASH].buf;
+	info.regions[REGION_ROOTHASH].buf = NULL;
+	container->size = (size_t) info.regions[REGION_HEADER].offset + info.regions[REGION_HEADER].size;
 	container->cms = cms;
 	cms = NULL;
 
 	r = 0;
 exit:
-	for (int i = 0; i < REGION_MAX; ++i) {
-		if (regions[i].buf != NULL)
-			free(regions[i].buf);
-	}
+	container_info_free(&info);
 	if (unlink(tmppath) != 0)
 		pr_info("failed removing tmpfile: %s\n", tmppath);
 	close(tmpfd);
