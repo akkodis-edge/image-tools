@@ -242,37 +242,6 @@ exit:
 	return r;
 }
 
-static int read_container_header(int fd, off64_t* header_pos, struct header* hdr)
-{
-	/* Reposition to start of header */
-	*header_pos = lseek64(fd, -HEADER_SIZE, SEEK_END);
-	if (*header_pos < 0) {
-		if (errno == EINVAL) {
-			return -ENOMSG; /* not of type container */
-		}
-		else {
-			return -errno;
-		}
-	}
-
-	/* read in header */
-	uint8_t buf[HEADER_SIZE];
-	int r = read_bytes(fd, buf, HEADER_SIZE);
-	if (r != 0)
-		return r;
-
-	r = container_header_parse(hdr, buf, HEADER_SIZE);
-	if (r != 0)
-		return r;
-
-	pr_dbg("hdr->tree_offset: %" PRIu64 "\n", hdr->tree_offset);
-	pr_dbg("hdr->root_offset: %" PRIu64 "\n", hdr->root_offset);
-	pr_dbg("hdr->digest_offset: %" PRIu64 "\n", hdr->digest_offset);
-	pr_dbg("hdr->key_offset: %" PRIu64 "\n", hdr->key_offset);
-
-	return 0;
-}
-
 /* enum used for array indexing, do not re-arrange */
 enum container_region_index {
 	REGION_HEADER,
@@ -291,6 +260,10 @@ struct region {
 	uint8_t *buf;
 };
 
+struct container_info {
+	struct region regions[REGION_MAX];
+};
+
 static int calculate_offset_size(struct region* region, off64_t previous_end, uint64_t ustart)
 {
 	if (previous_end < 0 || ustart > INT64_MAX)
@@ -303,9 +276,138 @@ static int calculate_offset_size(struct region* region, off64_t previous_end, ui
 	return 0;
 }
 
-static int header_has_cms(const struct header* hdr)
+static int container_info_has_cms(const struct container_info* info)
 {
-	return hdr->digest_offset == 0 && hdr->root_offset == 0;
+	return info->regions[REGION_DIGEST].size == 0 && info->regions[REGION_ROOTHASH].size == 0;
+}
+
+static int container_info_from_header(struct container_info* info, const struct header* hdr, off64_t file_size)
+{
+	/* data section starts at 0 and ends at tree offset which must be > 0 and divisible by 4096 */
+	if (hdr->tree_offset == 0 || hdr->tree_offset % 4096 != 0 || file_size < HEADER_SIZE)
+		return -EINVAL;
+
+	memset(info, 0, sizeof(*info));
+
+	/* Calculate offsets starting from end of file */
+	if (calculate_offset_size(&info->regions[REGION_HEADER], file_size, file_size - HEADER_SIZE) != 0)
+		return -EINVAL;
+
+	/* find key */
+	if (calculate_offset_size(&info->regions[REGION_PUBKEY], info->regions[REGION_HEADER].offset, hdr->key_offset) != 0)
+		return -EINVAL;
+
+	/* Determine whether plain key or cms structure was used.
+	 * cms structures contains key, digest and roothash in REGION_PUBKEY
+	 * while plain key needs all individual sections. */
+	if (hdr->digest_offset == 0 && hdr->root_offset == 0) {
+		/* cms */
+		if (calculate_offset_size(&info->regions[REGION_TREE], info->regions[REGION_PUBKEY].offset, hdr->tree_offset) != 0)
+			return -EINVAL;
+	}
+	else {
+		/* plain key */
+		if (calculate_offset_size(&info->regions[REGION_DIGEST], info->regions[REGION_PUBKEY].offset, hdr->digest_offset) != 0)
+			return -EINVAL;
+		if (calculate_offset_size(&info->regions[REGION_ROOTHASH], info->regions[REGION_DIGEST].offset, hdr->root_offset) != 0)
+			return -EINVAL;
+		if (calculate_offset_size(&info->regions[REGION_TREE], info->regions[REGION_ROOTHASH].offset, hdr->tree_offset) != 0)
+			return -EINVAL;
+	}
+
+	/* Data always start at offset 0 */
+	if (calculate_offset_size(&info->regions[REGION_DATA], info->regions[REGION_TREE].offset, 0) != 0)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int container_info_read_fd(struct container_info* info, int fd)
+{
+	/* Read regions pubkey, roothash and digest */
+	for (int i = REGION_PUBKEY; i < REGION_TREE; ++i) {
+		/* skip if size is 0 */
+		if (info->regions[i].size == 0)
+			continue;
+		/* check for overflow */
+		if ((SIZE_MAX - info->regions[i].size) < info->regions[i].extra)
+			return -EINVAL;
+
+		/* allocate, calloc ensures zeroed data */
+		info->regions[i].buf = calloc(1, info->regions[i].size + info->regions[i].extra);
+		if (info->regions[i].buf == NULL)
+			return -ENOMEM;
+
+		/* read to buffer */
+		const int r = pread_bytes(fd, info->regions[i].offset, info->regions[i].buf, info->regions[i].size);
+		if (r != 0) {
+			pr_err("failed reading from FILE: [%d] %s\n", -r, strerror(-r));
+			return r;
+		}
+	}
+
+	return 0;
+}
+
+static int container_info_validate_roothash(struct container_info* info, EVP_PKEY** pkey, CMS_ContentInfo** cms)
+{
+	int r = 0;
+
+	if (container_info_has_cms(info)) {
+		pr_dbg("hdr: cms structure\n");
+
+		r = crypt_parse_cms(info->regions[REGION_PUBKEY].buf, info->regions[REGION_PUBKEY].size, cms);
+		if (r != 0)
+			return r;
+
+		/* validate data and retrieve roothash */
+		r = crypt_cms_data(*cms, &info->regions[REGION_ROOTHASH].buf, &info->regions[REGION_ROOTHASH].size);
+		if (r != 0)
+			return r;
+
+		/* add null terminator */
+		if (SIZE_MAX - info->regions[REGION_ROOTHASH].size < 1)
+			return -EFAULT;
+
+		info->regions[REGION_ROOTHASH].size++;
+		uint8_t *newmem = realloc(info->regions[REGION_ROOTHASH].buf, info->regions[REGION_ROOTHASH].size);
+		if (newmem == NULL)
+			return -ENOMEM;
+
+		info->regions[REGION_ROOTHASH].buf = newmem;
+		info->regions[REGION_ROOTHASH].buf[info->regions[REGION_ROOTHASH].size - 1] = '\0';
+
+		return 0;
+	}
+	else {
+		pr_dbg("hdr: plain key signature\n");
+
+		r = crypt_parse_public_key(info->regions[REGION_PUBKEY].buf, info->regions[REGION_PUBKEY].size, pkey);
+		if (r != 0)
+			return r;
+
+		/* validate roothash signature */
+		r = crypt_digest_verity(info->regions[REGION_ROOTHASH].buf, info->regions[REGION_ROOTHASH].size,
+								info->regions[REGION_DIGEST].buf, info->regions[REGION_DIGEST].size, *pkey);
+		if (r < 0)
+			return r;
+		if (r != 1)
+			return -EBADF;
+
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static void container_info_free(struct container_info* info)
+{
+	for (int i = 0; i < REGION_MAX; ++i) {
+		if (info->regions[i].buf != NULL) {
+			free(info->regions[i].buf);
+			info->regions[i].buf = NULL;
+		}
+	}
 }
 
 static int container_read(struct container* container, int fd)
@@ -315,148 +417,70 @@ static int container_read(struct container* container, int fd)
 
 	container->opt = CONTAINER_NONE;
 
-	/* read header */
-	struct header hdr;
-	off64_t header_pos = 0;
-	int r = read_container_header(fd, &header_pos, &hdr);
-	switch (r) {
-	case 0:
-		break;
-	case -ENOMSG:
+	/* Get size of file */
+	const off64_t file_size = lseek64(fd, 0, SEEK_END);
+	if (file_size < 0)
+		return -errno;
+	/* Not of type container if size smaller than header */
+	if (file_size < HEADER_SIZE)
 		return 0;
-		break;
-	default:
-		pr_dbg("container - invalid header: [%d]: %s\n", -r, strerror(-r));
-		return r;
-	}
 
-	struct region regions[REGION_MAX];
-	memset(regions, 0, sizeof(regions));
+	/* read in header */
+	uint8_t buf[HEADER_SIZE];
+	struct header hdr;
+	int r = pread_bytes(fd, file_size - HEADER_SIZE, buf, HEADER_SIZE);
+	if (r != 0)
+		return r;
+	r = container_header_parse(&hdr, buf, HEADER_SIZE);
+	if (r != 0)
+		return 0;
+
+	pr_dbg("hdr->tree_offset: %" PRIu64 "\n", hdr.tree_offset);
+	pr_dbg("hdr->root_offset: %" PRIu64 "\n", hdr.root_offset);
+	pr_dbg("hdr->digest_offset: %" PRIu64 "\n", hdr.digest_offset);
+	pr_dbg("hdr->key_offset: %" PRIu64 "\n", hdr.key_offset);
+
+	/* calculate and validate region sizes */
+	struct container_info info;
+	if (container_info_from_header(&info, &hdr, file_size) != 0)
+		return 0;
+
+	/* Allocate an extra byte for roothash null-terminator*/
+	info.regions[REGION_ROOTHASH].extra = 1;
+
 	EVP_PKEY *pubkey = NULL;
 	CMS_ContentInfo *cms = NULL;
 
-	/* data section starts at 0 and ends at tree offset which must be > 0 and divisible by 4096 */
-	if (hdr.tree_offset == 0 || hdr.tree_offset % 4096 != 0)
-		return -ENOMSG;
+	/* Read and allocate data buffers */
+	r = container_info_read_fd(&info, fd);
+	if (r != 0)
+		goto exit;
 
-	/* find key */
-	if (calculate_offset_size(&regions[REGION_PUBKEY], header_pos, hdr.key_offset) != 0)
-		return -ENOMSG;
-	/* Determine whether plain key or cms structure was used.
-	 * cms structures contains key, digest and roothash in REGION_PUBKEY
-	 * while plain key needs to read all sections. */
-	if (!header_has_cms(&hdr)) { /* plain keys */
-		pr_dbg("hdr: plain key signature\n");
-		/* find digest */
-		if (calculate_offset_size(&regions[REGION_DIGEST], regions[REGION_PUBKEY].offset, hdr.digest_offset) != 0)
-			return -ENOMSG;
-		/* find roothash */
-		if (calculate_offset_size(&regions[REGION_ROOTHASH], regions[REGION_DIGEST].offset, hdr.root_offset) != 0)
-			return -ENOMSG;
-		/* allocate an extra byte for roothash null-terminator */
-		regions[REGION_ROOTHASH].extra = 1;
-		/* find tree */
-		if (calculate_offset_size(&regions[REGION_TREE], regions[REGION_ROOTHASH].offset, hdr.tree_offset) != 0)
-			return -ENOMSG;
-	}
-	else { /* CMS */
-		/* find tree */
-		pr_dbg("hdr: cms structure\n");
-		if (calculate_offset_size(&regions[REGION_TREE], regions[REGION_PUBKEY].offset, hdr.tree_offset) != 0)
-			return -ENOMSG;
-	}
-
-	/* Allocate buffers and read pubkey, digest and roothash */
-	const int read_stop_region = header_has_cms(&hdr) ? REGION_DIGEST : REGION_TREE;
-	for (int i = REGION_PUBKEY; i < read_stop_region; ++i) {
-		/* check for overflow */
-		if ((SIZE_MAX - regions[i].size) < regions[i].extra) {
-			r = -EINVAL;
-			goto exit;
-		}
-		/* allocate */
-		regions[i].buf = calloc(1, regions[i].size + regions[i].extra);
-		if (regions[i].buf == NULL) {
-			r = -ENOMEM;
-			goto exit;
-		}
-		/* read buffer */
-		r = pread_bytes(fd, regions[i].offset, regions[i].buf, regions[i].size);
-		if (r != 0) {
-			pr_err("failed reading from FILE: [%d] %s\n", -r, strerror(-r));
-			goto exit;
-		}
-	}
-
-	if (!header_has_cms(&hdr)) { /* parse pubkey */
-		r = crypt_parse_public_key(regions[REGION_PUBKEY].buf, regions[REGION_PUBKEY].size, &pubkey);
-		if (r != 0) {
-			pr_dbg("container - pubkey: [%d]: %s\n", -r, strerror(-r));
-			goto exit;
-		}
-
-		/* validate roothash signature */
-		r = crypt_digest_verity(regions[REGION_ROOTHASH].buf, regions[REGION_ROOTHASH].size,
-								regions[REGION_DIGEST].buf, regions[REGION_DIGEST].size, pubkey);
-		if (r < 0) {
-			pr_dbg("container - digest verify: [%d]: %s\n", -r, strerror(-r));
-			goto exit;
-		}
-		if (r == 0) {
-			pr_dbg("container - invalid signature\n");
-			r = -EBADF;
-			goto exit;
-		}
-	}
-	else { /* parse cms */
-		r = crypt_parse_cms(regions[REGION_PUBKEY].buf, regions[REGION_PUBKEY].size, &cms);
-		if (r != 0) {
-			pr_dbg("container - cms parse: [%d] %s\n", -r, strerror(-r));
-			goto exit;
-		}
-
-		/* validate data and retrieve roothash */
-		r = crypt_cms_data(cms, &regions[REGION_ROOTHASH].buf, &regions[REGION_ROOTHASH].size);
-		if (r != 0) {
-			pr_dbg("container - cms data: [%d] %s\n", -r, strerror(-r));
-			goto exit;
-		}
-		/* add null terminator */
-		if (SIZE_MAX - regions[REGION_ROOTHASH].size < 1) {
-			r = -EFAULT;
-			goto exit;
-		}
-		regions[REGION_ROOTHASH].size++;
-		uint8_t *newmem = realloc(regions[REGION_ROOTHASH].buf, regions[REGION_ROOTHASH].size);
-		if (newmem == NULL) {
-			r = -ENOMEM;
-			goto exit;
-		}
-		regions[REGION_ROOTHASH].buf = newmem;
-		regions[REGION_ROOTHASH].buf[regions[REGION_ROOTHASH].size - 1] = '\0';
+	/* verify roothash */
+	r = container_info_validate_roothash(&info, &pubkey, &cms);
+	if (r != 0) {
+		pr_dbg("container - roothash validation failed: [%d] %s\n", -r, strerror(-r));
+		goto exit;
 	}
 
 	pr_dbg("container - valid\n");
 
 	/* Set container data */
 	container->opt |= CONTAINER_VALID;
-	container->size = header_pos + HEADER_SIZE;
+	container->size = file_size;
 	memcpy(&container->hdr, &hdr, sizeof(container->hdr));
 	container->pubkey = pubkey;
 	pubkey = NULL;
 	container->cms = cms;
 	cms = NULL;
-	container->roothash = (char*) regions[REGION_ROOTHASH].buf;
-	regions[REGION_ROOTHASH].buf = NULL;
+	container->roothash = (char*) info.regions[REGION_ROOTHASH].buf;
+	info.regions[REGION_ROOTHASH].buf = NULL;
 
 	r = 0;
 exit:
 	EVP_PKEY_free(pubkey);
 	CMS_ContentInfo_free(cms);
-	for (int i = 0; i < REGION_MAX; ++i) {
-		if (regions[i].buf != NULL)
-			free(regions[i].buf);
-	}
+	container_info_free(&info);
 	return r;
 }
 
