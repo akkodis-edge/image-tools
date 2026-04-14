@@ -4,17 +4,17 @@
 #include "log.h"
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-int dbg = 0;
+int dbg__ = 0;
 void enable_debug(void)
 {
-	dbg = 1;
+	dbg__ = 1;
 }
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-int info = 1;
+int info__ = 1;
 void disable_info(void)
 {
-	info = 0;
+	info__ = 0;
 }
 
 void mprint(FILE* stream, const char* fmt, ...)

@@ -477,7 +477,7 @@ int main(int argc, char *argv[])
 			pr_err("Failed formatting container: [%d] %s\n", -r, strerror(-r));
 			goto exit;
 		}
-		if (info)
+		if (info__)
 			container_dump(container);
 		pr_info("container - created\n");
 		goto exit;
@@ -539,7 +539,7 @@ int main(int argc, char *argv[])
 						NULL, VERITY_VERIFY, container_get_roothash(container));
 		if (r < 0)
 			goto exit;
-		if (info)
+		if (info__)
 			container_dump(container);
 		pr_info("File verified OK\n");
 		goto exit;

@@ -229,7 +229,7 @@ int verity_create(const char* path, const char* tree, char** roothash)
 		goto exit;
 	}
 
-	if (dbg) {
+	if (dbg__) {
 		r = crypt_dump(cd);
 		if (r != 0)
 			pr_dbg("crypt_dump: [%d] %s\n", -r, strerror(-r));
