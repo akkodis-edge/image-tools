@@ -166,6 +166,7 @@ static void print_usage(void)
 	printf("  --keyfile-ca     x509 for --keyfile. Will wrap roothash, digest\n");
 	printf("                   and certificate in CMS as \"signed-data content type\"\n");
 	printf("  --signer         Dump either pubkey or cms as PEM form to provided path\n");
+	printf("  --pubkey-ca      Path to trusted root CA\n");
 	printf("\n");
 	printf("Input FILE size when creating a container should be a multiple of 4096,"
 			"if not it will be zero-padded\n");
@@ -203,6 +204,8 @@ enum options {
 	OPT_PUBKEY_ANY   = 1 << 5,
 	OPT_CLOSE        = 1 << 6,
 	OPT_SIGNER       = 1 << 7,
+	OPT_PUBKEY_CMS   = 1 << 8,
+	OPT_PUBKEY_PLAIN = 1 << 9,
 };
 
 struct config {
@@ -215,6 +218,7 @@ struct config {
 	char *pubkey_path;
 	char *pubkey_pkcs11;
 	char *pubkey_dir;
+	char *pubkey_ca;
 	char *signer_path;
 };
 
@@ -314,6 +318,7 @@ int main(int argc, char *argv[])
 				pr_err("invalid argument --pubkey\n");
 				return EINVAL;
 			}
+			cfg.opt |= OPT_PUBKEY_PLAIN;
 			cfg.pubkey_path = argv[i];
 		}
 		else if (strcmp("--pubkey-pkcs11", argv[i]) == 0) {
@@ -321,6 +326,7 @@ int main(int argc, char *argv[])
 				pr_err("invalid argument --pubkey-pkcs11\n");
 				return EINVAL;
 			}
+			cfg.opt |= OPT_PUBKEY_PLAIN;
 			cfg.pubkey_pkcs11 = argv[i];
 		}
 		else if (strcmp("--pubkey-dir", argv[i]) == 0) {
@@ -328,7 +334,16 @@ int main(int argc, char *argv[])
 				pr_err("invalid argument --pubkey-dir\n");
 				return EINVAL;
 			}
+			cfg.opt |= OPT_PUBKEY_PLAIN;
 			cfg.pubkey_dir = argv[i];
+		}
+		else if (strcmp("--pubkey-ca", argv[i]) == 0) {
+			if (++i >= argc) {
+				pr_err("invalid argument --pubkey-ca\n");
+				return EINVAL;
+			}
+			cfg.opt |= OPT_PUBKEY_CMS;
+			cfg.pubkey_ca = argv[i];
 		}
 		else if (strcmp("--pubkey-any", argv[i]) == 0) {
 			cfg.opt |= OPT_PUBKEY_ANY;
@@ -382,8 +397,9 @@ int main(int argc, char *argv[])
 	if ((cfg.opt & OPT_PUBKEY_ANY) == 0
 			&& cfg.pubkey_path == NULL
 			&& cfg.pubkey_pkcs11 == NULL
-			&& cfg.pubkey_dir == NULL) {
-		pr_err("Missing --pubkey, --pubkey-pkcs11, --pubkey-dir or --pubkey-any\n");
+			&& cfg.pubkey_dir == NULL
+			&& cfg.pubkey_ca == NULL) {
+		pr_err("Missing --pubkey, --pubkey-pkcs11, --pubkey-dir, --pubkey-ca or --pubkey-any\n");
 		return EINVAL;
 	}
 
@@ -474,17 +490,47 @@ int main(int argc, char *argv[])
 		goto exit;
 	}
 
-	/* Match pubkey.
+	/* Verify signer.
 	 *
 	 * If OPT_PUBKEY_ANY is set then we are
 	 * satisfied with digest verification towards
 	 * pubkey provided by container as part of container
 	 * validation. */
-	if ((cfg.opt & OPT_PUBKEY_ANY) != OPT_PUBKEY_ANY
-			&& match_pubkey(cfg.pubkey_path, cfg.pubkey_dir, cfg.pubkey_pkcs11, container_get_verification_key(container)) != 0) {
-		r = -EBADF;
-		pr_err("pubkey validation failed\n");
-		goto exit;
+	if ((cfg.opt & OPT_PUBKEY_ANY) != OPT_PUBKEY_ANY) {
+		/* Attempt verifying signer by any allowed method */
+		int signer_verified = 0;
+		/* plain private-public key pair */
+		if (signer_verified == 0 && (cfg.opt & OPT_PUBKEY_PLAIN) == OPT_PUBKEY_PLAIN) {
+			const EVP_PKEY *pkey = container_get_verification_key(container);
+			if (pkey != NULL) {
+				r = match_pubkey(cfg.pubkey_path, cfg.pubkey_dir, cfg.pubkey_pkcs11, pkey);
+				if (r != 0) {
+					r = -EBADF;
+					pr_err("container - pubkey validation failed\n");
+					goto exit;
+				}
+				signer_verified = 1;
+			}
+		}
+		/* x509 certificate chain of CMS */
+		if (signer_verified == 0 && (cfg.opt & OPT_PUBKEY_CMS) == OPT_PUBKEY_CMS) {
+			CMS_ContentInfo *cms = container_get_cms(container);
+			if (cms != NULL) {
+				r = crypt_cms_verify_signer(cms, cfg.pubkey_ca);
+				if (r != 0) {
+					r = -EBADF;
+					pr_err("container - cms validation failed\n");
+					goto exit;
+				}
+				signer_verified = 1;
+			}
+		}
+
+		if (signer_verified == 0) {
+			r = -EBADF;
+			pr_err("container - unexpected signature type\n");
+			goto exit;
+		}
 	}
 
 	/* verify data and tree to roothash */
