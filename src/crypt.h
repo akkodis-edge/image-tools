@@ -128,4 +128,9 @@ int crypt_cms_data(CMS_ContentInfo* cms, uint8_t** data, size_t* data_size);
  * Returns 0 for success or negative errno for error. */
 int crypt_cms_create(const uint8_t* data, size_t data_size, CMS_ContentInfo** cms, EVP_PKEY* pkey, X509* cert);
 
+/* Verify signer of "cms" towards trusted CA at path "trusted".
+ *
+ * Returns 1 for valid, 0 for invalid or negative errno for error. */
+int crypt_cms_verify_signer(CMS_ContentInfo* cms, const char* trusted);
+
 #endif // CRYPT__H__

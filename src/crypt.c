@@ -8,6 +8,7 @@
 #include <openssl/rsa.h>
 #include <openssl/store.h>
 #include <openssl/x509.h>
+#include <openssl/x509_vfy.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
 #include <openssl/provider.h>
@@ -686,3 +687,49 @@ exit:
 	return r;
 }
 
+int crypt_cms_verify_signer(CMS_ContentInfo* cms, const char* trusted)
+{
+	if (cms == NULL || trusted == NULL)
+		return -EINVAL;
+
+	int r = -EFAULT;
+
+	/* Ensure openssl errors are our errors */
+	ERR_clear_error();
+
+	X509_STORE *store = X509_STORE_new();
+	if (store == NULL) {
+		pr_err("Failed creating X509_STORE\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -EFAULT;
+		goto exit;
+	}
+
+	if (X509_STORE_set_purpose(store, X509_PURPOSE_CODE_SIGN) != 1) {
+		pr_err("Failed setting X509_STORE purpose\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -EFAULT;
+		goto exit;
+	}
+
+	if (X509_STORE_load_file(store, trusted) != 1) {
+		pr_err("Failed loading trusted\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -EIO;
+		goto exit;
+	}
+
+	if (CMS_verify(cms, NULL, store, NULL, NULL, 0) != 1) {
+		pr_err("Failed verifying cms\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -EFAULT;
+		goto exit;
+	}
+
+
+	r = 0;
+
+exit:
+	X509_STORE_free(store);
+	return r;
+}
