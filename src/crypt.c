@@ -717,8 +717,17 @@ int crypt_cms_verify_signer(CMS_ContentInfo* cms, const char* trusted)
 		goto exit;
 	}
 
-	if (X509_STORE_set_purpose(store, X509_PURPOSE_CODE_SIGN) != 1) {
+	if (X509_STORE_set_purpose(store, X509_PURPOSE_SMIME_SIGN) != 1) {
 		pr_err("Failed setting X509_STORE purpose\n");
+		ERR_print_errors_cb(error_cb, NULL);
+		r = -EFAULT;
+		goto exit;
+	}
+
+	const int flags = X509_V_FLAG_NO_CHECK_TIME | X509_V_FLAG_X509_STRICT
+						| X509_V_FLAG_TRUSTED_FIRST;
+	if (X509_STORE_set_flags(store, flags) != 1) {
+		pr_err("Failed setting X509_STORE flags\n");
 		ERR_print_errors_cb(error_cb, NULL);
 		r = -EFAULT;
 		goto exit;
