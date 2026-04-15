@@ -111,15 +111,30 @@ void container_dump(const struct container* container)
 
 	CMS_ContentInfo *cms = container_get_cms((struct container*) container);
 	if (cms != NULL) {
-		STACK_OF(X509) *sk_x509 = CMS_get0_signers(cms);
-		printf("  CMS signatures: %d\n", sk_X509_num(sk_x509));
-		X509 *signer = NULL;
-		int index = 0;
-		while ((signer = sk_X509_pop(sk_x509)) != NULL) {
-			dump_x509(index, signer);
-			index++;
+		STACK_OF(X509) *sk_signers = CMS_get0_signers(cms); /* Stack of NON-owning X509 */
+		STACK_OF(X509) *sk_certs = CMS_get1_certs(cms); /* Stack of OWNING X509 */
+		if (sk_signers != NULL) {
+			printf("  CMS signatures:\n");
+			for (int i = 0; i < sk_X509_num(sk_signers); ++i)
+				dump_x509(i, sk_X509_value(sk_signers, i));
 		}
-		sk_X509_free(sk_x509);
+		if (sk_signers != NULL && sk_certs != NULL) {
+			int index = 0;
+			printf("  CMS certificates:\n");
+			for (int i = 0; i < sk_X509_num(sk_certs); ++i) {
+				X509 *cert = sk_X509_value(sk_certs, i);
+				if (cert == NULL)
+					continue;
+				/* Check if present in sk_signers to avoid double printing */
+				if (sk_X509_find(sk_signers, cert) < 0) {
+					dump_x509(index, cert);
+					index++;
+				}
+				X509_free(cert);
+			}
+		}
+		sk_X509_free(sk_signers);
+		sk_X509_free(sk_certs);
 	}
 }
 
