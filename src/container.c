@@ -925,6 +925,13 @@ static int container_match_cms_roothash(const struct container* container, CMS_C
 	return 0;
 }
 
+static off64_t container_get_tree_end(const struct container* container)
+{
+	if (container_get_verification_key(container) != NULL)
+		return container->hdr.root_offset;
+	return container->hdr.key_offset;
+}
+
 int container_replace(struct container* container, CMS_ContentInfo* cms)
 {
 	if (!container_is_valid(container) || cms == NULL)
@@ -965,7 +972,7 @@ int container_replace(struct container* container, CMS_ContentInfo* cms)
 		pr_err("%s: [%d] %s\n", container->path, -r, strerror(-r));
 		goto exit;
 	}
-	r = ftruncate64(fd, (off64_t) container->hdr.root_offset);
+	r = ftruncate64(fd, (off64_t) container_get_tree_end(container));
 	if (r == 0)
 		r = container_info_write_fd(&info, fd);
 	close(fd);
