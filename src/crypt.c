@@ -699,9 +699,9 @@ exit:
 	return r;
 }
 
-int crypt_cms_verify_signer(CMS_ContentInfo* cms, const char* trusted)
+int crypt_cms_verify_signer(CMS_ContentInfo* cms, const char* trusted, const char* trusted_dir)
 {
-	if (cms == NULL || trusted == NULL)
+	if (cms == NULL || (trusted == NULL && trusted_dir == NULL))
 		return -EINVAL;
 
 	int r = -EFAULT;
@@ -733,11 +733,22 @@ int crypt_cms_verify_signer(CMS_ContentInfo* cms, const char* trusted)
 		goto exit;
 	}
 
-	if (X509_STORE_load_file(store, trusted) != 1) {
-		pr_err("Failed loading trusted\n");
-		ERR_print_errors_cb(error_cb, NULL);
-		r = -EIO;
-		goto exit;
+	if (trusted != NULL) {
+		if (X509_STORE_load_file(store, trusted) != 1) {
+			pr_err("Failed loading trusted\n");
+			ERR_print_errors_cb(error_cb, NULL);
+			r = -EIO;
+			goto exit;
+		}
+	}
+
+	if (trusted_dir != NULL) {
+		if (X509_STORE_load_path(store, trusted_dir) != 1) {
+			pr_err("Failed loading trusted_dir\n");
+			ERR_print_errors_cb(error_cb, NULL);
+			r = -EIO;
+			goto exit;
+		}
 	}
 
 	if (CMS_verify(cms, NULL, store, NULL, NULL, 0) != 1) {
