@@ -160,6 +160,69 @@ PKCS#1 v1.5 padding is used with RSA keys.
 +-------+----------+--------+
 ```
 
+Container roothash can optionally be signed as a CMS (Cryptographic Message Syntax, RFC 5652) "SignedData Type".
+
+Create an image container signed by a self-signed certificate.
+
+```
+# Create self-signed certificate
+openssl req -x509 -noenc -newkey EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -keyout tmp.pem -out tmp.crt -days 14 -addext extendedKeyUsage=emailProtection -subj "/CN=image release v0.11.0"
+
+# Create 10MB dummy file
+dd if=/dev/random of=image.container bs=1M count=10
+
+# Create signed image container
+container-util --create --keyfile tmp.pem --keyfile-ca tmp.crt image.container
+
+# Extract CMS as cms.pem
+container-util --signer cms.pem image.container
+```
+
+Setup 2-tier CA and signing key
+
+```
+# CA key
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out ca.pem
+# CA crt
+openssl req -x509 -key ca.pem -out ca.crt -sha256 -days 14600 -addext basicConstraints=critical,CA:TRUE,pathlen:1 -addext keyUsage=critical,keyCertSign -addext extendedKeyUsage=emailProtection -subj "/CN=Akkodis Image CA"
+
+# Inter key
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out inter.pem
+# Inter cert
+openssl req -x509 -CA ca.crt -CAkey ca.pem -key inter.pem -out inter.crt -sha256 -days 14600 -addext basicConstraints=critical,CA:TRUE,pathlen:0 -addext keyUsage=critical,keyCertSign -addext extendedKeyUsage=emailProtection -subj "/CN=Akkodis Image Intermediate"
+
+# Signing key
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out user.pem
+# Signign cert
+openssl req -x509 -CA inter.crt -CAkey inter.pem -key user.pem -out user.crt -sha256 -days 14600 -addext basicConstraints=critical,CA:FALSE -addext keyUsage=critical,digitalSignature -addext extendedKeyUsage=emailProtection -subj "/CN=ms@akkodis.se"
+
+# Collect certificate chain as pem stack
+cat inter.crt ca.crt > chain.crt
+```
+
+Create new CMS with signing key, including certificate chain
+
+```
+# inspect cms data
+openssl cms -cmsout -in cms.pem -inform pem -print
+
+# Extract roothash
+openssl cms -verify -in cms.pem -inform pem -out roothash -binary -noverify
+
+# Sign with new key and include certificate chain
+openssl cms -sign -in roothash -md sha256 -signer user.crt -inkey user.pem -certfile chain.crt -out cms2.pem -outform pem -binary -nosmimecap -nodetach
+```
+
+Replace CMS in image container
+
+```
+# Replace CMS
+container-util --replace cms2.pem image.container
+
+# Confirm verification towards root CA
+container-util --verify --pubkey-ca ca.crt image.container
+```
+
 ### simple-container.sh
 Skeleton utility providing a base for creating more advanced processing of image files to be deployed. In the provided form it simply repackages a tar archived rootfs into a preformatted filesystem image which is then provided as a full disk and update container.
 
