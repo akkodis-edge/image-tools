@@ -86,6 +86,13 @@ int crypt_read_pkey(struct crypt_read_pkey_ctx* ctx, EVP_PKEY** pkey, char** nam
  * Returns 0 for success or negative errno for error. */
 int crypt_read_x509(X509** x509, const char* path);
 
+/* Read "cms" from "path".
+ *
+ * Caller responsible of freeing "cms".
+ *
+ * Returns 0 for success or negative errno for error. */
+int crypt_read_cms(CMS_ContentInfo** cms, const char* path);
+
 /* Return hash method to use with pkey.
  * crypt_digest_* functions use this hash method.
  *

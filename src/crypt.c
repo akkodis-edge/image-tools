@@ -384,6 +384,18 @@ int crypt_read_x509(X509** x509, const char* path)
 	return 0;
 }
 
+int crypt_read_cms(CMS_ContentInfo** cms, const char* path)
+{
+	FILE *fp = fopen(path, "r");
+	if (fp == NULL)
+		return -errno;
+	*cms = PEM_read_CMS(fp, NULL, NULL, NULL);
+	fclose(fp);
+	if (*cms == NULL)
+		return -EBADF;
+	return 0;
+}
+
 const char* crypt_pkey_hash_function(const EVP_PKEY* pkey)
 {
 	const int bits = EVP_PKEY_get_bits(pkey);
