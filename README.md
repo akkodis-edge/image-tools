@@ -221,6 +221,12 @@ container-util --replace cms2.pem image.container
 
 # Confirm verification towards root CA
 container-util --verify --pubkey-ca ca.crt image.container
+
+# Container verification towards hashed root ca directory
+mkdir ca
+cp ca.crt ca/
+openssl rehash ca
+container-util --verify --pubkey-ca-dir ca image.container
 ```
 
 ### simple-container.sh
