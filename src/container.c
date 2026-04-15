@@ -823,9 +823,9 @@ int container_write(int fd, const char* path, struct container* container)
 			goto exit;
 		}
 
-		/* roothash and digest part of cms, do not write to container */
-		region_free(&info.regions[REGION_ROOTHASH]);
-		region_free(&info.regions[REGION_DIGEST]);
+		/* Ensure roothash and digest are not written by setting size to 0 before container_info_write_fd(). */
+		info.regions[REGION_ROOTHASH].size = 0;
+		info.regions[REGION_DIGEST].size = 0;
 	}
 
 	/* Create header */
