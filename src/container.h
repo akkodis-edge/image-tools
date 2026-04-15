@@ -4,6 +4,7 @@
 
 #include <openssl/evp.h>
 #include <openssl/x509.h>
+#include <openssl/cms.h>
 
 struct container;
 
@@ -69,6 +70,13 @@ int container_set_signing_cert(struct container* container, X509* cert);
  *
  * Returns 0 on success or negative errno for error. */
 int container_format(struct container* container);
+
+/* Replace signature with "cms" and write to file.
+ *
+ * "container" will take ownership of "cms". Do not free.
+ *
+ * Returns 0 on success or negative errno for error. */
+int container_replace(struct container* container, CMS_ContentInfo* cms);
 
 /* Print container info */
 void container_dump(const struct container* container);

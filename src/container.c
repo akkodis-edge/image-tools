@@ -382,23 +382,28 @@ static int container_info_set_digest(struct container_info* info, EVP_PKEY* pkey
 	return 0;
 }
 
-static int container_info_set_cms(struct container_info* info, CMS_ContentInfo** cms, EVP_PKEY* pkey, X509* cert)
+static int container_info_set_cms(struct container_info* info, const CMS_ContentInfo* cms)
 {
-	/* Create cms with roothash */
-	int r = crypt_cms_create(info->regions[REGION_ROOTHASH].buf, info->regions[REGION_ROOTHASH].size,
-							cms, pkey, cert);
-	if (r != 0)
-		return r;
-
 	/* serialize */
-	r = crypt_serialize_cms(&info->regions[REGION_PUBKEY].buf, &info->regions[REGION_PUBKEY].size,
-									*cms);
+	const int r = crypt_serialize_cms(&info->regions[REGION_PUBKEY].buf, &info->regions[REGION_PUBKEY].size,
+									cms);
 	if (r != 0)
 		return r;
 	if (calculate_offset(&info->regions[REGION_TREE], &info->regions[REGION_PUBKEY].offset) != 0)
 		return -EINVAL;
 
 	return 0;
+}
+
+static int container_info_create_cms(struct container_info* info, CMS_ContentInfo** cms, EVP_PKEY* pkey, X509* cert)
+{
+	/* Create cms with roothash */
+	const int r = crypt_cms_create(info->regions[REGION_ROOTHASH].buf, info->regions[REGION_ROOTHASH].size,
+							cms, pkey, cert);
+	if (r != 0)
+		return r;
+
+	return container_info_set_cms(info, *cms);
 }
 
 static int container_info_to_header(struct container_info* info, struct header* hdr)
@@ -522,14 +527,16 @@ static int container_info_validate_roothash(struct container_info* info, EVP_PKE
 	return -EINVAL;
 }
 
+static void region_free(struct region* region)
+{
+	if (region->buf != NULL)
+		free(region->buf);
+	memset(region, 0, sizeof(*region));
+}
 static void container_info_free(struct container_info* info)
 {
-	for (int i = 0; i < REGION_MAX; ++i) {
-		if (info->regions[i].buf != NULL) {
-			free(info->regions[i].buf);
-			info->regions[i].buf = NULL;
-		}
-	}
+	for (int i = 0; i < REGION_MAX; ++i)
+		region_free(&info->regions[i]);
 }
 
 static int container_read(struct container* container, int fd)
@@ -795,19 +802,15 @@ int container_write(int fd, const char* path, struct container* container)
 	}
 	else {
 		/* cms */
-		r = container_info_set_cms(&info, &cms, container->signing_key, container->signing_cert);
+		r = container_info_create_cms(&info, &cms, container->signing_key, container->signing_cert);
 		if (r != 0) {
 			pr_err("failed creating cms: [%d] %s\n", -r, strerror(-r));
 			goto exit;
 		}
 
 		/* roothash and digest part of cms, do not write to container */
-		if (info.regions[REGION_ROOTHASH].buf != NULL)
-			free(info.regions[REGION_ROOTHASH].buf);
-		memset(&info.regions[REGION_ROOTHASH], 0, sizeof(info.regions[REGION_ROOTHASH]));
-		if (info.regions[REGION_DIGEST].buf != NULL)
-			free(info.regions[REGION_DIGEST].buf);
-		memset(&info.regions[REGION_DIGEST], 0, sizeof(info.regions[REGION_DIGEST]));
+		region_free(&info.regions[REGION_ROOTHASH]);
+		region_free(&info.regions[REGION_DIGEST]);
 	}
 
 	/* Create header */
@@ -890,5 +893,84 @@ int container_format(struct container* container)
 exit:
 	if (fd >= 0)
 		close(fd);
+	return r;
+}
+
+static int container_match_cms_roothash(const struct container* container, CMS_ContentInfo* cms)
+{
+	uint8_t *data = NULL;
+	size_t size = 0;
+	int r = crypt_cms_data(cms, &data, &size);
+	if (r != 0)
+		return r;
+	const int equal = (size == strlen(container->roothash)) && (memcmp(data, container->roothash, size) == 0);
+	free(data);
+	return equal ? 0 : 1;
+}
+
+int container_replace(struct container* container, CMS_ContentInfo* cms)
+{
+	if (!container_is_valid(container) || cms == NULL)
+		return -EINVAL;
+
+	/* Roothash of cms must match container */
+	int r = container_match_cms_roothash(container, cms);
+	if (r != 0) {
+		pr_err("Provided CMS roothash does not match container\n");
+		return r;
+	}
+
+	/* prepare info structure */
+	struct container_info info;
+	r = container_info_from_header(&info, &container->hdr, container->size);
+	if (r != 0)
+		goto exit;
+
+	/* Insert CMS */
+	r = container_info_set_cms(&info, cms);
+	if (r != 0)
+		goto exit;
+
+	/* Ensure roothash and digest are not written */
+	region_free(&info.regions[REGION_ROOTHASH]);
+	region_free(&info.regions[REGION_DIGEST]);
+
+	/* Update header */
+	struct header hdr;
+	r = container_info_to_header(&info, &hdr);
+	if (r != 0)
+		goto exit;
+
+	/* open file and remove all metadata */
+	const int fd = open(container->path, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		r = -errno;
+		pr_err("%s: [%d] %s\n", container->path, -r, strerror(-r));
+		goto exit;
+	}
+	r = ftruncate64(fd, (off64_t) container->hdr.root_offset);
+	if (r == 0)
+		r = container_info_write_fd(&info, fd);
+	close(fd);
+	if (r != 0) {
+		r = -errno;
+		pr_err("%s: failed writing: [%d]: %s\n", container->path, -r, strerror(-r));
+		goto exit;
+	}
+
+	/* set container parameters */
+	EVP_PKEY_free(container->signing_key);
+	container->signing_key = NULL;
+	EVP_PKEY_free(container->pubkey);
+	container->pubkey = NULL;
+	X509_free(container->signing_cert);
+	container->signing_cert = NULL;
+	container->size = (size_t) info.regions[REGION_HEADER].offset + info.regions[REGION_HEADER].size;
+	CMS_ContentInfo_free(container->cms);
+	container->cms = cms;
+
+	r = 0;
+exit:
+	container_info_free(&info);
 	return r;
 }
