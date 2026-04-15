@@ -167,6 +167,7 @@ static void print_usage(void)
 	printf("                   and certificate in CMS as \"signed-data content type\"\n");
 	printf("  --signer         Dump either pubkey or cms as PEM form to provided path\n");
 	printf("  --pubkey-ca      Path to trusted root CA\n");
+	printf("  --pubkey-ca-dir  Path to trusted root CA directory\n");
 	printf("  --replace        Path to CMS to install to container\n");
 	printf("\n");
 	printf("Input FILE size when creating a container should be a multiple of 4096,"
@@ -221,6 +222,7 @@ struct config {
 	char *pubkey_pkcs11;
 	char *pubkey_dir;
 	char *pubkey_ca;
+	char *pubkey_ca_dir;
 	char *signer_path;
 	char *replace_path;
 };
@@ -348,6 +350,14 @@ int main(int argc, char *argv[])
 			cfg.opt |= OPT_PUBKEY_CMS;
 			cfg.pubkey_ca = argv[i];
 		}
+		else if (strcmp("--pubkey-ca-dir", argv[i]) == 0) {
+			if (++i >= argc) {
+				pr_err("invalid argument --pubkey-ca-dir\n");
+				return EINVAL;
+			}
+			cfg.opt |= OPT_PUBKEY_CMS;
+			cfg.pubkey_ca_dir = argv[i];
+		}
 		else if (strcmp("--replace", argv[i]) == 0) {
 			if (++i >= argc) {
 				pr_err("invalid argument --replace\n");
@@ -409,8 +419,9 @@ int main(int argc, char *argv[])
 			&& cfg.pubkey_path == NULL
 			&& cfg.pubkey_pkcs11 == NULL
 			&& cfg.pubkey_dir == NULL
-			&& cfg.pubkey_ca == NULL) {
-		pr_err("Missing --pubkey, --pubkey-pkcs11, --pubkey-dir, --pubkey-ca or --pubkey-any\n");
+			&& cfg.pubkey_ca == NULL
+			&& cfg.pubkey_ca_dir == NULL) {
+		pr_err("Missing --pubkey, --pubkey-pkcs11, --pubkey-dir, --pubkey-ca, --pubkey-ca-dir or --pubkey-any\n");
 		return EINVAL;
 	}
 
@@ -551,7 +562,7 @@ int main(int argc, char *argv[])
 		if (signer_verified == 0 && (cfg.opt & OPT_PUBKEY_CMS) == OPT_PUBKEY_CMS) {
 			CMS_ContentInfo *cms = container_get_cms(container);
 			if (cms != NULL) {
-				r = crypt_cms_verify_signer(cms, cfg.pubkey_ca);
+				r = crypt_cms_verify_signer(cms, cfg.pubkey_ca, cfg.pubkey_ca_dir);
 				if (r != 0) {
 					r = -EBADF;
 					pr_err("container - cms validation failed\n");
