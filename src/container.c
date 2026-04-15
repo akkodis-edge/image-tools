@@ -905,7 +905,9 @@ static int container_match_cms_roothash(const struct container* container, CMS_C
 		return r;
 	const int equal = (size == strlen(container->roothash)) && (memcmp(data, container->roothash, size) == 0);
 	free(data);
-	return equal ? 0 : 1;
+	if (!equal)
+		return -EINVAL;
+	return 0;
 }
 
 int container_replace(struct container* container, CMS_ContentInfo* cms)

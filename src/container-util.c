@@ -167,6 +167,7 @@ static void print_usage(void)
 	printf("                   and certificate in CMS as \"signed-data content type\"\n");
 	printf("  --signer         Dump either pubkey or cms as PEM form to provided path\n");
 	printf("  --pubkey-ca      Path to trusted root CA\n");
+	printf("  --replace        Path to CMS to install to container\n");
 	printf("\n");
 	printf("Input FILE size when creating a container should be a multiple of 4096,"
 			"if not it will be zero-padded\n");
@@ -206,6 +207,7 @@ enum options {
 	OPT_SIGNER       = 1 << 7,
 	OPT_PUBKEY_CMS   = 1 << 8,
 	OPT_PUBKEY_PLAIN = 1 << 9,
+	OPT_REPLACE      = 1 << 10,
 };
 
 struct config {
@@ -220,6 +222,7 @@ struct config {
 	char *pubkey_dir;
 	char *pubkey_ca;
 	char *signer_path;
+	char *replace_path;
 };
 
 static int write_signer(struct container* container, const char* path)
@@ -345,6 +348,14 @@ int main(int argc, char *argv[])
 			cfg.opt |= OPT_PUBKEY_CMS;
 			cfg.pubkey_ca = argv[i];
 		}
+		else if (strcmp("--replace", argv[i]) == 0) {
+			if (++i >= argc) {
+				pr_err("invalid argument --replace\n");
+				return EINVAL;
+			}
+			cfg.opt |= OPT_REPLACE | OPT_PUBKEY_ANY;
+			cfg.replace_path = argv[i];
+		}
 		else if (strcmp("--pubkey-any", argv[i]) == 0) {
 			cfg.opt |= OPT_PUBKEY_ANY;
 		}
@@ -377,8 +388,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if ((cfg.opt & (OPT_VERIFY_ONLY | OPT_CREATE | OPT_OPEN | OPT_ROOTHASH | OPT_CLOSE | OPT_SIGNER)) == 0) {
-		pr_err("Missing operation --verify, --create, --open, --close or --roothash\n");
+	if ((cfg.opt & (OPT_VERIFY_ONLY | OPT_CREATE | OPT_OPEN | OPT_ROOTHASH | OPT_CLOSE | OPT_SIGNER | OPT_REPLACE)) == 0) {
+		pr_err("Missing operation --verify, --create, --open, --close, --replace or --roothash\n");
 		return EINVAL;
 	}
 
@@ -487,6 +498,30 @@ int main(int argc, char *argv[])
 	if (!container_is_valid(container)) {
 		pr_err("container - not a container\n");
 		r = -EBADF;
+		goto exit;
+	}
+
+	/* Replace cms */
+	if ((cfg.opt & OPT_REPLACE) == OPT_REPLACE) {
+		/* Read CMS */
+		CMS_ContentInfo *cms = NULL;
+		r = crypt_read_cms(&cms, cfg.replace_path);
+		if (r != 0) {
+			pr_err("%s: Failed reading cms: [%d] %s\n", cfg.replace_path, -r, strerror(-r));
+			goto exit;
+		}
+		/* Write CMS to container */
+		r = container_replace(container, cms);
+		if (r != 0) {
+			CMS_ContentInfo_free(cms);
+			cms = NULL;
+			pr_err("Failed replacing container: [%d] %s\n", -r, strerror(-r));
+			goto exit;
+		}
+
+		if (info__)
+			container_dump(container);
+		pr_info("container - replaced\n");
 		goto exit;
 	}
 
