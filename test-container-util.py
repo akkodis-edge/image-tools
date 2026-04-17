@@ -9,7 +9,7 @@ import shutil
 import datetime
 from subprocess import CalledProcessError
 from cryptography import x509
-from cryptography.hazmat.primitives.asymmetric import rsa, ec
+from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
 from cryptography.hazmat.primitives import serialization, hashes
 
 class ENOENT(RuntimeError):
@@ -129,19 +129,21 @@ def write_file(path, data, encoding=serialization.Encoding.PEM,
     with open(path, mode='wb') as f:
         f.write(out)
 
-def dmverity_format(roothash, tree, data):
+def dmverity_format(tree, data):
+    tmp = tempfile.NamedTemporaryFile()
     args = ['/usr/sbin/veritysetup', '--data-block-size=4096', '--hash-block-size=4096',
-            'format', '--root-hash-file={}'.format(roothash), data, tree]
+            'format', '--root-hash-file={}'.format(tmp.name), data, tree]
     r = subprocess.run(args, capture_output=True, text=True, check=True)
-    return r.stdout
+    with open(tmp.name, 'r+b') as f:
+        out = f.read()
+    return out
 
-def sign_data(key, data, digest, hash='sha256', extra=['-pkeyopt', 'rsa_padding_mode:pkcs1']):
-    args = ['openssl', 'pkeyutl', '-sign', '-in', data, '-inkey', key, '-out', digest,
-            '-digest', hash, '-rawin']
-    if extra:
-        args.extend(extra)
-    r = subprocess.run(args, capture_output=True, text=True, check=True)
-    return r.stdout
+def sign_data(pkey, data, hash=hashes.SHA256(), rsa_padding=padding.PKCS1v15()):
+    if isinstance(pkey, ec.EllipticCurvePrivateKey):
+        return pkey.sign(data, ec.ECDSA(hash))
+    if isinstance(pkey, rsa.RSAPrivateKey):
+        return pkey.sign(data, rsa_padding, hash)
+    raise RuntimeError('unsupported pkey type for signing')
 
 def sign_cms(key, cert, certfile, data, out, hash='sha256'):
     args = ['openssl', 'cms', '-sign', '-in', data, '-md' ,hash, '-signer', cert,
@@ -182,7 +184,7 @@ class test_verify(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory(delete=True)
         self.dir = self.tmpdir.name
-        self.roothash = os.path.join(self.dir, 'roothash')
+        self.roothash_path = os.path.join(self.dir, 'roothash')
         self.tree = os.path.join(self.dir, 'tree')
         self.data = os.path.join(self.dir, 'data')
         generate_file(self.data, 16384)
@@ -190,24 +192,26 @@ class test_verify(unittest.TestCase):
         self.public_key_path = os.path.join(self.dir, 'public_key')
         write_file(self.private_key_path, self.pkey)
         write_file(self.public_key_path, self.pkey.public_key(), encoding=serialization.Encoding.DER)
-        self.digest = os.path.join(self.dir, 'digest')
+        self.digest_path = os.path.join(self.dir, 'digest')
         self.header = os.path.join(self.dir, 'header')
         self.container = os.path.join(self.dir, 'container')
-        dmverity_format(self.roothash, self.tree, self.data)
-        sign_data(self.private_key_path, self.roothash, self.digest)
+        self.roothash = dmverity_format(self.tree, self.data)
+        self.digest = sign_data(self.pkey, self.roothash)
+        write_file(self.roothash_path, self.roothash)
+        write_file(self.digest_path, self.digest)
     def tearDown(self):
         self.tmpdir.cleanup()
     def test_ok(self):
-        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key_path)
-        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key_path, self.header)
+        make_header(self.header, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path)
+        assemble_file(self.container, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path, self.header)
         self.assertIn('File verified OK', container_util_verify(self.container, public_key=self.public_key_path))
     def test_ok_pubkey_any(self):
-        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key_path)
-        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key_path, self.header)
+        make_header(self.header, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path)
+        assemble_file(self.container, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path, self.header)
         self.assertIn('File verified OK', container_util_verify(self.container))
     def test_ok_pubkey_dir(self):
-        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key_path)
-        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key_path, self.header)
+        make_header(self.header, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path)
+        assemble_file(self.container, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path, self.header)
         public_dir = os.path.join(self.dir, 'public_dir')
         os.mkdir(public_dir)
         shutil.copy(self.public_key_path, public_dir)
@@ -219,13 +223,13 @@ class test_verify(unittest.TestCase):
         self.cms_path = os.path.join(self.dir, 'cms')
         write_file(self.ca_key_path, self.ca_key)
         write_file(self.ca_cert_path, self.ca_cert)
-        sign_cms(self.ca_key_path, self.ca_cert_path, None, self.roothash, self.cms_path)
+        sign_cms(self.ca_key_path, self.ca_cert_path, None, self.roothash_path, self.cms_path)
         make_header(self.header, self.data, self.tree, None, None, self.cms_path)
         assemble_file(self.container, self.data, self.tree, None, None, self.cms_path, self.header)
         self.assertIn('File verified OK', container_util_verify(self.container, public_key_ca=self.ca_cert_path))
     def test_ok_pubkey_dir_multiple_keys(self):
-        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key_path)
-        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key_path, self.header)
+        make_header(self.header, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path)
+        assemble_file(self.container, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path, self.header)
         public_dir = os.path.join(self.dir, 'public_dir')
         os.mkdir(public_dir)
         shutil.copy(self.public_key_path, public_dir)
@@ -233,15 +237,15 @@ class test_verify(unittest.TestCase):
         write_file(os.path.join(public_dir, 'public_key.wrong'), wrong_pkey.public_key())
         self.assertIn('File verified OK', container_util_verify(self.container, public_dir=public_dir))
     def test_error_empty_pubkey_dir(self):
-        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key_path)
-        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key_path, self.header)
+        make_header(self.header, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path)
+        assemble_file(self.container, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path, self.header)
         public_dir = os.path.join(self.dir, 'public_dir')
         os.mkdir(public_dir)
         with self.assertRaises(EBADF):
             container_util_verify(self.container, public_dir=public_dir)
     def test_error_empty_pubkey_dir(self):
-        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key_path)
-        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key_path, self.header)
+        make_header(self.header, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path)
+        assemble_file(self.container, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path, self.header)
         public_dir = os.path.join(self.dir, 'public_dir')
         os.mkdir(public_dir)
         wrong_pkey = rsa.generate_private_key(public_exponent=65537, key_size=1024)
@@ -251,15 +255,15 @@ class test_verify(unittest.TestCase):
     def test_error_wrong_public_key(self):
         wrong_pkey = rsa.generate_private_key(public_exponent=65537, key_size=1024)
         write_file(self.public_key_path, wrong_pkey.public_key(), encoding=serialization.Encoding.DER)
-        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key_path)
-        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key_path, self.header)
+        make_header(self.header, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path)
+        assemble_file(self.container, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path, self.header)
         with self.assertRaises(EBADF):
             container_util_verify(self.container, public_key=self.public_key_path)
     def test_error_modified_data(self):
         with open(self.data, 'r+b') as f:
             f.write(b'\x00')
-        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key_path)
-        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key_path, self.header)
+        make_header(self.header, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path)
+        assemble_file(self.container, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path, self.header)
         with self.assertRaises(EBADF):
             container_util_verify(self.container, public_key=self.public_key_path)
     def test_error_no_header(self):
@@ -273,10 +277,10 @@ class test_verify(unittest.TestCase):
         with self.assertRaises(EBADF):
             container_util_verify(self.data, public_key=self.public_key_path)
     def test_error_invalid_header_magic(self):
-        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key_path)
+        make_header(self.header, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path)
         with open(self.header, 'r+b') as f:
             f.write(b'\x00')
-        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key_path, self.header)
+        assemble_file(self.container, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path, self.header)
         with self.assertRaises(EBADF):
             container_util_verify(self.container, public_key=self.public_key_path)
     def test_error_no_file(self):
@@ -309,7 +313,7 @@ class test_roothash(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory(delete=True)
         self.dir = self.tmpdir.name
-        self.roothash = os.path.join(self.dir, 'roothash')
+        self.roothash_path = os.path.join(self.dir, 'roothash')
         self.tree = os.path.join(self.dir, 'tree')
         self.data = os.path.join(self.dir, 'data')
         generate_file(self.data, 16384)
@@ -317,17 +321,19 @@ class test_roothash(unittest.TestCase):
         self.public_key_path = os.path.join(self.dir, 'public_key')
         write_file(self.private_key_path, self.pkey)
         write_file(self.public_key_path, self.pkey.public_key(), encoding=serialization.Encoding.DER)
-        self.digest = os.path.join(self.dir, 'digest')
+        self.digest_path = os.path.join(self.dir, 'digest')
         self.header = os.path.join(self.dir, 'header')
         self.container = os.path.join(self.dir, 'container')
-        dmverity_format(self.roothash, self.tree, self.data)
-        sign_data(self.private_key_path, self.roothash, self.digest)
+        self.roothash = dmverity_format(self.tree, self.data)
+        self.digest = sign_data(self.pkey, self.roothash)
+        write_file(self.roothash_path, self.roothash)
+        write_file(self.digest_path, self.digest)
     def tearDown(self):
         self.tmpdir.cleanup()
     def test_ok(self):
-        make_header(self.header, self.data, self.tree, self.roothash, self.digest, self.public_key_path)
-        assemble_file(self.container, self.data, self.tree, self.roothash, self.digest, self.public_key_path, self.header)
-        with open(self.roothash, 'r') as f:
+        make_header(self.header, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path)
+        assemble_file(self.container, self.data, self.tree, self.roothash_path, self.digest_path, self.public_key_path, self.header)
+        with open(self.roothash_path, 'r') as f:
             roothash = f.read()
         self.assertEqual(container_util_roothash(self.container, self.public_key_path), '{}\n'.format(roothash))
 
@@ -335,39 +341,41 @@ class test_key_types(unittest.TestCase):
     def setUp(self):
         traditional=serialization.PrivateFormat.TraditionalOpenSSL
         pkcs8=serialization.PrivateFormat.PKCS8
+        pkcs1=padding.PKCS1v15()
+        pss=padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH)
         self.rsa_key_types = [
-            # bits, hash, pkey_format, extra_signing_options, success
-            (1024, 'sha256', pkcs8, None, True),
-            (2048, 'sha256', pkcs8, None, True),
-            (3072, 'sha256', pkcs8, None, True),
-            (4096, 'sha256', pkcs8, None, True),
+            # bits, hash, pkey_format, padding, success
+            (1024, hashes.SHA256(), pkcs8, pkcs1, True),
+            (2048, hashes.SHA256(), pkcs8, pkcs1, True),
+            (3072, hashes.SHA256(), pkcs8, pkcs1, True),
+            (4096, hashes.SHA256(), pkcs8, pkcs1, True),
             # traditional format OK
-            (4096, 'sha256', traditional, None, True),
+            (4096, hashes.SHA256(), traditional, pkcs1, True),
             # error on wrong hash
-            (4096, 'sha1', pkcs8, None, False),
+            (4096, hashes.SHA1(), pkcs8, pkcs1, False),
             # error on wrong padding
-            (4096, 'sha256', pkcs8, ['-pkeyopt', 'rsa_padding_mode:pss',
-                                     '-pkeyopt', 'rsa_pss_saltlen:-1'], False)
+            (4096, hashes.SHA256(), pkcs8, pss, False)
         ]
         self.ec_key_types = [
             # oid, hash, pkey_format, success
-            (ec.SECP192R1, 'sha256', pkcs8, True),
-            (ec.SECP224R1, 'sha256', pkcs8, True),
-            (ec.SECP256K1, 'sha256', pkcs8, True),
-            (ec.SECP256R1, 'sha256', pkcs8, True),
-            (ec.SECP384R1, 'sha384', pkcs8, True),
-            (ec.SECP521R1, 'sha512', pkcs8, True),
+            (ec.SECP192R1, hashes.SHA256(), pkcs8, True),
+            (ec.SECP224R1, hashes.SHA256(), pkcs8, True),
+            (ec.SECP256K1, hashes.SHA256(), pkcs8, True),
+            (ec.SECP256R1, hashes.SHA256(), pkcs8, True),
+            (ec.SECP384R1, hashes.SHA384(), pkcs8, True),
+            (ec.SECP521R1, hashes.SHA512(), pkcs8, True),
             # traditional format OK
-            (ec.SECP192R1, 'sha256', traditional, True),
+            (ec.SECP192R1, hashes.SHA256(), traditional, True),
             # error on wrong hash
-            (ec.SECP521R1, 'sha256', pkcs8, False),
+            (ec.SECP521R1, hashes.SHA256(), pkcs8, False),
         ]
         self.tmpdir = tempfile.TemporaryDirectory(delete=True)
         self.dir = self.tmpdir.name
     def tearDown(self):
         self.tmpdir.cleanup()
     def test_rsa_verify(self):
-        for bits, hash, pkey_format, extra, success in self.rsa_key_types:
+        for bits, hash, pkey_format, padding, success in self.rsa_key_types:
             # generate data
             data_path = os.path.join(self.dir, 'rsa-{}.data'.format(bits))
             generate_file(data_path, 16384)
@@ -380,11 +388,13 @@ class test_key_types(unittest.TestCase):
             # Generate tree and roothash
             tree_path = os.path.join(self.dir, 'rsa-{}.tree'.format(bits))
             root_path = os.path.join(self.dir, 'rsa-{}.root'.format(bits))
-            dmverity_format(root_path, tree_path, data_path)
+            roothash = dmverity_format(tree_path, data_path)
             # generate and write digest
             digest_path = os.path.join(self.dir, 'rsa-{}.digest'.format(bits))
-            sign_data(pkey_path, root_path, digest_path, hash=hash, extra=extra)
+            digest = sign_data(pkey, roothash, hash=hash, rsa_padding=padding)
             # create header
+            write_file(root_path, roothash)
+            write_file(digest_path, digest)
             header_path = os.path.join(self.dir, 'rsa-{}.header'.format(bits))
             make_header(header_path, data_path, tree_path, root_path, digest_path, pub_path)
             # assemble container
@@ -426,11 +436,13 @@ class test_key_types(unittest.TestCase):
             # Generate tree and roothash
             tree_path = os.path.join(self.dir, 'ec-{}.tree'.format(curve.name))
             root_path = os.path.join(self.dir, 'ec-{}.root'.format(curve.name))
-            dmverity_format(root_path, tree_path, data_path)
+            roothash = dmverity_format(tree_path, data_path)
             # generate and write digest
             digest_path = os.path.join(self.dir, 'ec-{}.digest'.format(curve.name))
-            sign_data(pkey_path, root_path, digest_path, hash=hash, extra=None)
+            digest = sign_data(pkey, roothash, hash=hash)
             # create header
+            write_file(root_path, roothash)
+            write_file(digest_path, digest)
             header_path = os.path.join(self.dir, 'ec-{}.header'.format(curve.name))
             make_header(header_path, data_path, tree_path, root_path, digest_path, pub_path)
             # assemble container
