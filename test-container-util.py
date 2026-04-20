@@ -57,8 +57,13 @@ def container_util_verify(container, public_key=None, public_dir=None, public_ke
 def container_util_create(file, private_key):
     return container_util(['--create', '--keyfile', private_key, file])
 
-def container_util_roothash(file, public_key):
-    return container_util(['--roothash', '-q', '--pubkey', public_key, file])
+def container_util_roothash(file, public_key=None, public_key_ca=None):
+    args = ['--roothash', '-q', file]
+    if public_key != None:
+        args.extend(['--pubkey', public_key])
+    if public_key_ca != None:
+        args.extend(['--pubkey-ca', public_key_ca])
+    return container_util(args)
 
 def generate_cert_selfigned():
     pkey = ec.generate_private_key(ec.SECP256R1())
@@ -322,7 +327,15 @@ class test_roothash(unittest.TestCase):
         self.tmpdir.cleanup()
     def test_ok(self):
         assemble_file(self.container_path, self.data_path, self.tree_path, self.roothash, self.digest, pub_to_der(self.pkey.public_key()))
-        self.assertEqual(container_util_roothash(self.container_path, self.public_key_path), '{}\n'.format(self.roothash.decode('UTF-8')))
+        self.assertEqual(container_util_roothash(self.container_path, public_key=self.public_key_path), '{}\n'.format(self.roothash.decode('UTF-8')))
+    def test_cms_ok(self):
+        self.ca_key, self.ca_cert = generate_cert_selfigned()
+        self.ca_cert_path = os.path.join(self.dir, 'ca_cert')
+        self.cms_path = os.path.join(self.dir, 'cms')
+        write_file(self.ca_cert_path, self.ca_cert)
+        cms = sign_cms(self.ca_key, self.ca_cert, self.roothash)
+        assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
+        self.assertEqual(container_util_roothash(self.container_path, public_key_ca=self.ca_cert_path), '{}\n'.format(self.roothash.decode('UTF-8')))
 
 class test_key_types(unittest.TestCase):
     def setUp(self):
