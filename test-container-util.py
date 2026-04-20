@@ -11,6 +11,7 @@ from subprocess import CalledProcessError
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
 from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.serialization import pkcs7
 
 class ENOENT(RuntimeError):
     pass
@@ -145,17 +146,20 @@ def sign_data(pkey, data, hash=hashes.SHA256(), rsa_padding=padding.PKCS1v15()):
         return pkey.sign(data, rsa_padding, hash)
     raise RuntimeError('unsupported pkey type for signing')
 
-def sign_cms(key, cert, certfile, data, hash='sha256'):
-    tmp = tempfile.NamedTemporaryFile()
-    args = ['openssl', 'cms', '-sign', '-in', data, '-md' ,hash, '-signer', cert,
-            '-inkey', key, '-out', tmp.name, '-outform', 'der', '-binary', '-nosmimecap',
-            '-nodetach']
-    if certfile:
-        args.extend(['-certfile', certfile])
-    r = subprocess.run(args, capture_output=True, text=True, check=True)
-    with open(tmp.name, 'r+b') as f:
-        out = f.read()
-    return out
+def sign_cms(pkey, cert, data, certfile=[], hash=hashes.SHA256()):
+    builder = pkcs7.PKCS7SignatureBuilder()
+    builder = builder.set_data(data)
+
+    padding = None
+    if isinstance(pkey, rsa.RSAPrivateKey):
+        padding = padding.PKCS1v15()
+    builder = builder.add_signer(cert, pkey, hash, rsa_padding=padding)
+
+    for certificate in certfile:
+        builder = builder.add_certificate(certificate)
+
+    options = (pkcs7.PKCS7Options.Binary, pkcs7.PKCS7Options.NoCapabilities)
+    return builder.sign(serialization.Encoding.DER, options)
 
 def make_header(data, tree, roothash, digest, public_key):
     out = bytearray()
@@ -224,12 +228,10 @@ class test_verify(unittest.TestCase):
         self.assertIn('File verified OK', container_util_verify(self.container_path, public_dir=public_dir))
     def test_cms_ok(self):
         self.ca_key, self.ca_cert = generate_cert_selfigned()
-        self.ca_key_path = os.path.join(self.dir, 'ca_key')
         self.ca_cert_path = os.path.join(self.dir, 'ca_cert')
         self.cms_path = os.path.join(self.dir, 'cms')
-        write_file(self.ca_key_path, self.ca_key)
         write_file(self.ca_cert_path, self.ca_cert)
-        cms = sign_cms(self.ca_key_path, self.ca_cert_path, None, self.roothash_path)
+        cms = sign_cms(self.ca_key, self.ca_cert, self.roothash)
         assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
         self.assertIn('File verified OK', container_util_verify(self.container_path, public_key_ca=self.ca_cert_path))
     def test_ok_pubkey_dir_multiple_keys(self):
