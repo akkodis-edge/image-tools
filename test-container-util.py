@@ -134,6 +134,24 @@ def generate_cert(cn, issuer_pkey=None, issuer=None, ca=False, path_length=None)
     cert = builder.sign(signer, hashes.SHA256())
     return pkey, cert
 
+def generate_pki(depth=0):
+    # root certificate
+    pkey, cert = generate_cert('ca', ca=True, path_length=depth)
+    pki = {'ca': {'pkey': pkey, 'cert': cert}, 'inter': []}
+    # optional intermediates
+    index = 1
+    while index <= depth:
+        name = 'inter{}'.format(index)
+        pkey, cert = generate_cert(name, issuer_pkey=pkey, issuer=cert,
+                                   ca=True, path_length=depth - index)
+        pki[name] = {'pkey': pkey, 'cert': cert}
+        pki['inter'].append(cert)
+        index += 1
+    pkey, cert = generate_cert('signer', issuer_pkey=pkey, issuer=cert,
+                                   ca=False, path_length=None)
+    pki['signer'] = {'pkey': pkey, 'cert': cert}
+    return pki
+
 def generate_file(path, size):
     with open(path, mode='wb') as f:
         f.write(b'\x7a' * size)
@@ -236,6 +254,8 @@ class test_verify(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.pkey = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        cls.pki_t1 = generate_pki(depth=0)
+        cls.pki_t2 = generate_pki(depth=1)
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory(delete=True)
         self.dir = self.tmpdir.name
@@ -285,27 +305,42 @@ class test_verify(unittest.TestCase):
         openssl_rehash(ca_dir)
         self.assertIn('File verified OK', container_util_verify(self.container_path, public_key_ca_dir=ca_dir))
     def test_cms_t1_ok(self):
-        self.ca_key, self.ca_cert = generate_cert('root-ca', ca=True, path_length=0)
-        self.signer_key, self.signer_cert = generate_cert('signer', issuer_pkey=self.ca_key, issuer=self.ca_cert, ca=False, path_length=None)
         self.ca_cert_path = os.path.join(self.dir, 'ca_cert')
-        write_file(self.ca_cert_path, self.ca_cert)
-        cms = sign_cms(self.signer_key, self.signer_cert, self.roothash)
+        write_file(self.ca_cert_path, self.pki_t1['ca']['cert'])
+        cms = sign_cms(self.pki_t1['signer']['pkey'], self.pki_t1['signer']['cert'], self.roothash)
         assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
         self.assertIn('File verified OK', container_util_verify(self.container_path, public_key_ca=self.ca_cert_path))
     def test_cms_t1_ok_pubkey_any(self):
-        self.ca_key, self.ca_cert = generate_cert('root-ca', ca=True, path_length=0)
-        self.signer_key, self.signer_cert = generate_cert('signer', issuer_pkey=self.ca_key, issuer=self.ca_cert, ca=False, path_length=None)
-        cms = sign_cms(self.signer_key, self.signer_cert, self.roothash)
+        cms = sign_cms(self.pki_t1['signer']['pkey'], self.pki_t1['signer']['cert'], self.roothash)
         assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
         self.assertIn('File verified OK', container_util_verify(self.container_path))
     def test_cms_t1_ok_pubkey_ca_dir(self):
-        self.ca_key, self.ca_cert = generate_cert('root-ca', ca=True, path_length=0)
-        self.signer_key, self.signer_cert = generate_cert('signer', issuer_pkey=self.ca_key, issuer=self.ca_cert, ca=False, path_length=None)
-        cms = sign_cms(self.signer_key, self.signer_cert, self.roothash)
+        cms = sign_cms(self.pki_t1['signer']['pkey'], self.pki_t1['signer']['cert'], self.roothash)
         assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
         ca_dir = os.path.join(self.dir, 'ca')
         os.mkdir(ca_dir)
-        write_file(os.path.join(ca_dir, 'cert1.crt'), self.ca_cert)
+        write_file(os.path.join(ca_dir, 'ca.crt'), self.pki_t1['ca']['cert'])
+        openssl_rehash(ca_dir)
+        self.assertIn('File verified OK', container_util_verify(self.container_path, public_key_ca_dir=ca_dir))
+    def test_cms_t2_ok(self):
+        self.ca_cert_path = os.path.join(self.dir, 'ca_cert')
+        write_file(self.ca_cert_path, self.pki_t2['ca']['cert'])
+        cms = sign_cms(self.pki_t2['signer']['pkey'], self.pki_t2['signer']['cert'], self.roothash,
+                       certfile=self.pki_t2['inter'])
+        assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
+        self.assertIn('File verified OK', container_util_verify(self.container_path, public_key_ca=self.ca_cert_path))
+    def test_cms_t2_ok_pubkey_any(self):
+        cms = sign_cms(self.pki_t2['signer']['pkey'], self.pki_t2['signer']['cert'], self.roothash,
+                       certfile=self.pki_t2['inter'])
+        assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
+        self.assertIn('File verified OK', container_util_verify(self.container_path))
+    def test_cms_t2_ok_pubkey_ca_dir(self):
+        cms = sign_cms(self.pki_t2['signer']['pkey'], self.pki_t2['signer']['cert'], self.roothash,
+                       certfile=self.pki_t2['inter'])
+        assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
+        ca_dir = os.path.join(self.dir, 'ca')
+        os.mkdir(ca_dir)
+        write_file(os.path.join(ca_dir, 'ca.crt'), self.pki_t2['ca']['cert'])
         openssl_rehash(ca_dir)
         self.assertIn('File verified OK', container_util_verify(self.container_path, public_key_ca_dir=ca_dir))
     def test_ok_pubkey_dir_multiple_keys(self):
