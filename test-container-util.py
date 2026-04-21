@@ -40,7 +40,7 @@ def container_util(args):
         raise EUNKNOWN(r.stdout + r.stderr)
     return r.stdout
 
-def container_util_verify(container, public_key=None, public_dir=None, public_key_ca=None):
+def container_util_verify(container, public_key=None, public_dir=None, public_key_ca=None, public_key_ca_dir=None):
     args = ['--verify',  container]
     extra = []
     if public_key != None:
@@ -49,6 +49,8 @@ def container_util_verify(container, public_key=None, public_dir=None, public_ke
         extra.extend(['--pubkey-dir', public_dir])
     if public_key_ca != None:
         extra.extend(['--pubkey-ca', public_key_ca])
+    if public_key_ca_dir != None:
+        extra.extend(['--pubkey-ca-dir', public_key_ca_dir])
     if not extra:
         extra.append('--pubkey-any')
     args.extend(extra)
@@ -65,14 +67,49 @@ def container_util_roothash(file, public_key=None, public_key_ca=None):
         args.extend(['--pubkey-ca', public_key_ca])
     return container_util(args)
 
-def generate_cert_selfigned():
+# Will be self-signed if issuers is None.
+def generate_cert(cn, issuer_pkey=None, issuer=None, ca=False, path_length=None):
     pkey = ec.generate_private_key(ec.SECP256R1())
-    subject = x509.Name([
-                x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, 'root CA')
-                ])
+    subject_name = x509.Name([
+            x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, cn)
+            ])
+    if issuer == None:
+        issuer_name = subject_name
+        authority = x509.AuthorityKeyIdentifier.from_issuer_public_key(pkey.public_key())
+        usage = x509.KeyUsage(
+                    digital_signature=True,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True if ca else False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                )
+        basic = x509.BasicConstraints(ca=ca, path_length=path_length)
+        signer = pkey
+    else:
+        issuer_name = issuer.subject
+        authority = x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+            issuer.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value)
+        usage = x509.KeyUsage(
+                    digital_signature=True,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True if ca else False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                )
+        basic = x509.BasicConstraints(ca=ca, path_length=path_length)
+        signer = issuer_pkey
+
     builder = x509.CertificateBuilder()
-    builder = builder.subject_name(subject)
-    builder = builder.issuer_name(subject)
+    builder = builder.subject_name(subject_name)
+    builder = builder.issuer_name(issuer_name)
     builder = builder.public_key(pkey.public_key())
     builder = builder.serial_number(x509.random_serial_number())
     builder = builder.not_valid_before(
@@ -80,20 +117,10 @@ def generate_cert_selfigned():
     builder = builder.not_valid_after(
             datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
     builder = builder.add_extension(
-        x509.BasicConstraints(ca=True, path_length=1),
+        basic,
         critical=True)
     builder = builder.add_extension(
-        x509.KeyUsage(
-            digital_signature=True,
-            content_commitment=False,
-            key_encipherment=False,
-            data_encipherment=False,
-            key_agreement=False,
-            key_cert_sign=True,
-            crl_sign=False,
-            encipher_only=False,
-            decipher_only=False,
-            ),
+        usage,
         critical=True)
     builder = builder.add_extension(
         x509.ExtendedKeyUsage([x509.ExtendedKeyUsageOID.EMAIL_PROTECTION]),
@@ -102,9 +129,9 @@ def generate_cert_selfigned():
         x509.SubjectKeyIdentifier.from_public_key(pkey.public_key()),
         critical=False)
     builder = builder.add_extension(
-        x509.AuthorityKeyIdentifier.from_issuer_public_key(pkey.public_key()),
+        authority,
         critical=False)
-    cert = builder.sign(pkey, hashes.SHA256())
+    cert = builder.sign(signer, hashes.SHA256())
     return pkey, cert
 
 def generate_file(path, size):
@@ -134,6 +161,11 @@ def write_file(path, data, encoding=serialization.Encoding.PEM,
 
     with open(path, mode='wb') as f:
         f.write(out)
+
+# Create openssl-style CA directory for trusted certificate lookup
+def openssl_rehash(dir):
+    subprocess.run(['openssl', 'rehash', dir],
+                   capture_output=True, text=True, check=True)
 
 def dmverity_format(tree, data):
     tmp = tempfile.NamedTemporaryFile()
@@ -231,14 +263,51 @@ class test_verify(unittest.TestCase):
         os.mkdir(public_dir)
         shutil.copy(self.public_key_path, public_dir)
         self.assertIn('File verified OK', container_util_verify(self.container_path, public_dir=public_dir))
-    def test_cms_ok(self):
-        self.ca_key, self.ca_cert = generate_cert_selfigned()
+    def test_cms_ss_ok(self):
+        self.ca_key, self.ca_cert = generate_cert('self-signed', ca=True, path_length=0)
         self.ca_cert_path = os.path.join(self.dir, 'ca_cert')
-        self.cms_path = os.path.join(self.dir, 'cms')
         write_file(self.ca_cert_path, self.ca_cert)
         cms = sign_cms(self.ca_key, self.ca_cert, self.roothash)
         assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
         self.assertIn('File verified OK', container_util_verify(self.container_path, public_key_ca=self.ca_cert_path))
+    def test_cms_ss_ok_pubkey_any(self):
+        self.ca_key, self.ca_cert = generate_cert('self-signed', ca=True, path_length=0)
+        cms = sign_cms(self.ca_key, self.ca_cert, self.roothash)
+        assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
+        self.assertIn('File verified OK', container_util_verify(self.container_path))
+    def test_cms_ss_ok_pubkey_ca_dir(self):
+        self.ca_key, self.ca_cert = generate_cert('self-signed', ca=True, path_length=0)
+        cms = sign_cms(self.ca_key, self.ca_cert, self.roothash)
+        assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
+        ca_dir = os.path.join(self.dir, 'ca')
+        os.mkdir(ca_dir)
+        write_file(os.path.join(ca_dir, 'cert1.crt'), self.ca_cert)
+        openssl_rehash(ca_dir)
+        self.assertIn('File verified OK', container_util_verify(self.container_path, public_key_ca_dir=ca_dir))
+    def test_cms_t1_ok(self):
+        self.ca_key, self.ca_cert = generate_cert('root-ca', ca=True, path_length=0)
+        self.signer_key, self.signer_cert = generate_cert('signer', issuer_pkey=self.ca_key, issuer=self.ca_cert, ca=False, path_length=None)
+        self.ca_cert_path = os.path.join(self.dir, 'ca_cert')
+        write_file(self.ca_cert_path, self.ca_cert)
+        cms = sign_cms(self.signer_key, self.signer_cert, self.roothash)
+        assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
+        self.assertIn('File verified OK', container_util_verify(self.container_path, public_key_ca=self.ca_cert_path))
+    def test_cms_t1_ok_pubkey_any(self):
+        self.ca_key, self.ca_cert = generate_cert('root-ca', ca=True, path_length=0)
+        self.signer_key, self.signer_cert = generate_cert('signer', issuer_pkey=self.ca_key, issuer=self.ca_cert, ca=False, path_length=None)
+        cms = sign_cms(self.signer_key, self.signer_cert, self.roothash)
+        assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
+        self.assertIn('File verified OK', container_util_verify(self.container_path))
+    def test_cms_t1_ok_pubkey_ca_dir(self):
+        self.ca_key, self.ca_cert = generate_cert('root-ca', ca=True, path_length=0)
+        self.signer_key, self.signer_cert = generate_cert('signer', issuer_pkey=self.ca_key, issuer=self.ca_cert, ca=False, path_length=None)
+        cms = sign_cms(self.signer_key, self.signer_cert, self.roothash)
+        assemble_file(self.container_path, self.data_path, self.tree_path, None, None, cms)
+        ca_dir = os.path.join(self.dir, 'ca')
+        os.mkdir(ca_dir)
+        write_file(os.path.join(ca_dir, 'cert1.crt'), self.ca_cert)
+        openssl_rehash(ca_dir)
+        self.assertIn('File verified OK', container_util_verify(self.container_path, public_key_ca_dir=ca_dir))
     def test_ok_pubkey_dir_multiple_keys(self):
         assemble_file(self.container_path, self.data_path, self.tree_path, self.roothash, self.digest, pub_to_der(self.pkey.public_key()))
         public_dir = os.path.join(self.dir, 'public_dir')
@@ -329,7 +398,7 @@ class test_roothash(unittest.TestCase):
         assemble_file(self.container_path, self.data_path, self.tree_path, self.roothash, self.digest, pub_to_der(self.pkey.public_key()))
         self.assertEqual(container_util_roothash(self.container_path, public_key=self.public_key_path), '{}\n'.format(self.roothash.decode('UTF-8')))
     def test_cms_ok(self):
-        self.ca_key, self.ca_cert = generate_cert_selfigned()
+        self.ca_key, self.ca_cert = generate_cert('root-ca')
         self.ca_cert_path = os.path.join(self.dir, 'ca_cert')
         self.cms_path = os.path.join(self.dir, 'cms')
         write_file(self.ca_cert_path, self.ca_cert)
