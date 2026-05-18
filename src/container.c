@@ -22,7 +22,7 @@ enum container_flags {
 
 struct container {
 	char *path;
-	size_t size;
+	off64_t size;
 	struct header hdr;
 	char *roothash;
 	CMS_ContentInfo *cms;
@@ -87,12 +87,12 @@ void container_dump(const struct container* container)
 {
 	printf("container:\n"
 			"  section   offset     size\n"
-			"  data:     %-10" PRIu64 " [%zu b]\n"
-			"  tree:     %-10" PRIu64 " [%zu b]\n"
-			"  root:     %-10" PRIu64 " [%zu b]\n"
-			"  digest:   %-10" PRIu64 " [%zu b]\n"
-			"  pubkey:   %-10" PRIu64 " [%zu b]\n"
-			"  header:   %-10" PRIu64 " [%zu b]\n"
+			"  data:     %-10" PRIu64 " [%" PRIu64 " b]\n"
+			"  tree:     %-10" PRIu64 " [%" PRIu64 " b]\n"
+			"  root:     %-10" PRIu64 " [%" PRIu64 " b]\n"
+			"  digest:   %-10" PRIu64 " [%" PRIu64 " b]\n"
+			"  pubkey:   %-10" PRIu64 " [%" PRId64 " b]\n"
+			"  header:   %-10" PRId64 " [%" PRIu64 " b]\n"
 			"  roothash: %s\n",
 
 				(uint64_t) 0, container->hdr.tree_offset,
@@ -270,7 +270,7 @@ enum container_region_index {
 
 struct region {
 	off64_t offset;
-	size_t size;
+	off64_t size;
 	size_t extra;
 	uint8_t *buf;
 };
@@ -371,6 +371,105 @@ static int container_info_set_tree(struct container_info* info, int fd)
 	return 0;
 }
 
+static size_t off64_to_size(off64_t in, int* error)
+{
+	if (in < 0 || (uintmax_t) in > SIZE_MAX) {
+		*error = 1;
+		return 0;
+	}
+	*error = 0;
+	return (size_t) in;
+}
+
+static off64_t size_to_off64(size_t in, int* error)
+{
+	const uintmax_t cast = in;
+	if (cast > INT64_MAX) {
+		*error = 1;
+		return 0;
+	}
+	*error = 0;
+	return (off64_t) in;
+}
+
+/* cast_ functions to accept off64_t instead of size_t */
+static int cast_crypt_digest_create(const uint8_t* data, off64_t data_size, uint8_t** digest, off64_t* digest_size, EVP_PKEY* pkey)
+{
+	int cast_error = 0;
+	const size_t cast_data_size = off64_to_size(data_size, &cast_error);
+	if (cast_error != 0)
+		return -EINVAL;
+
+	size_t return_digest_size = 0;
+	const int r = crypt_digest_create(data, cast_data_size, digest, &return_digest_size, pkey);
+	if (r != 0)
+		return r;
+
+	const off64_t cast_digest_size = size_to_off64(return_digest_size, &cast_error);
+	if (cast_error != 0) {
+		free(*digest);
+		*digest = NULL;
+		return -EINVAL;
+	}
+
+	*digest_size = cast_digest_size;
+	return 0;
+}
+static int cast_crypt_serialize_public_key(uint8_t** data, off64_t* size, const EVP_PKEY* pkey)
+{
+	size_t return_size = 0;
+	const int r = crypt_serialize_public_key(data, &return_size, pkey);
+	if (r != 0)
+		return r;
+
+	int cast_error = 0;
+	const off64_t cast_size = size_to_off64(return_size, &cast_error);
+	if (cast_error != 0) {
+		free(*data);
+		*data = NULL;
+		return -EINVAL;
+	}
+
+	*size = cast_size;
+	return 0;
+}
+static int cast_crypt_serialize_cms(uint8_t** data, off64_t* size, const CMS_ContentInfo* cms)
+{
+	size_t return_size = 0;
+	const int r = crypt_serialize_cms(data, &return_size, cms);
+	if (r != 0)
+		return r;
+
+	int cast_error = 0;
+	const off64_t cast_size = size_to_off64(return_size, &cast_error);
+	if (cast_error != 0) {
+		free(*data);
+		*data = NULL;
+		return -EINVAL;
+	}
+
+	*size = cast_size;
+	return 0;
+}
+static int cast_crypt_cms_data(CMS_ContentInfo* cms, uint8_t** data, off64_t* data_size)
+{
+	size_t return_size = 0;
+	const int r = crypt_cms_data(cms, data, &return_size);
+	if (r != 0)
+		return r;
+
+	int cast_error = 0;
+	const off64_t cast_size = size_to_off64(return_size, &cast_error);
+	if (cast_error != 0) {
+		free(*data);
+		*data = NULL;
+		return -EINVAL;
+	}
+
+	*data_size = cast_size;
+	return 0;
+}
+
 static int container_info_set_digest(struct container_info* info, EVP_PKEY* pkey)
 {
 	/* calculate roothash offset */
@@ -378,7 +477,7 @@ static int container_info_set_digest(struct container_info* info, EVP_PKEY* pkey
 		return -EINVAL;
 
 	/* Calculate digest of roothash */
-	int r = crypt_digest_create(info->regions[REGION_ROOTHASH].buf, info->regions[REGION_ROOTHASH].size,
+	int r = cast_crypt_digest_create(info->regions[REGION_ROOTHASH].buf, info->regions[REGION_ROOTHASH].size,
 							&info->regions[REGION_DIGEST].buf, &info->regions[REGION_DIGEST].size,
 							pkey);
 	if (r != 0)
@@ -387,7 +486,7 @@ static int container_info_set_digest(struct container_info* info, EVP_PKEY* pkey
 		return -EINVAL;
 
 	/* Retrieve pubkey */
-	r = crypt_serialize_public_key(&info->regions[REGION_PUBKEY].buf, &info->regions[REGION_PUBKEY].size,
+	r = cast_crypt_serialize_public_key(&info->regions[REGION_PUBKEY].buf, &info->regions[REGION_PUBKEY].size,
 									pkey);
 	if (r != 0)
 		return r;
@@ -400,7 +499,7 @@ static int container_info_set_digest(struct container_info* info, EVP_PKEY* pkey
 static int container_info_set_cms(struct container_info* info, const CMS_ContentInfo* cms)
 {
 	/* serialize */
-	const int r = crypt_serialize_cms(&info->regions[REGION_PUBKEY].buf, &info->regions[REGION_PUBKEY].size,
+	const int r = cast_crypt_serialize_cms(&info->regions[REGION_PUBKEY].buf, &info->regions[REGION_PUBKEY].size,
 									cms);
 	if (r != 0)
 		return r;
@@ -503,7 +602,7 @@ static int container_info_validate_roothash(struct container_info* info, EVP_PKE
 			return r;
 
 		/* validate data and retrieve roothash */
-		r = crypt_cms_data(*cms, &info->regions[REGION_ROOTHASH].buf, &info->regions[REGION_ROOTHASH].size);
+		r = cast_crypt_cms_data(*cms, &info->regions[REGION_ROOTHASH].buf, &info->regions[REGION_ROOTHASH].size);
 		if (r != 0)
 			return r;
 
@@ -856,7 +955,7 @@ int container_write(int fd, const char* path, struct container* container)
 		container->pubkey = container->signing_key;
 	container->roothash = (char*) info.regions[REGION_ROOTHASH].buf;
 	info.regions[REGION_ROOTHASH].buf = NULL;
-	container->size = (size_t) info.regions[REGION_HEADER].offset + info.regions[REGION_HEADER].size;
+	container->size = info.regions[REGION_HEADER].offset + info.regions[REGION_HEADER].size;
 	container->cms = cms;
 	cms = NULL;
 
